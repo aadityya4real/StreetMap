@@ -216,7 +216,9 @@ input:focus-visible {
   background: #d0a638;
 }
 
-.context-result-location-available .context-status-dot {
+.context-result-broad-area .context-status-dot,
+.context-result-map-center .context-status-dot,
+.context-result-unverified-place-reference .context-status-dot {
   background: #56836b;
 }
 

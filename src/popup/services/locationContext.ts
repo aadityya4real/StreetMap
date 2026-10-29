@@ -13,6 +13,12 @@ const browserMessenger: LocationContextMessenger = {
   requestContext(tabId) {
     return browser.tabs.sendMessage(tabId, { type: LOCATION_CONTEXT_REQUEST });
   },
+  async injectContentScript(tabId) {
+    await browser.scripting.executeScript({
+      target: { tabId },
+      files: ['content-scripts/google-maps.js'],
+    });
+  },
 };
 
 export function getActiveLocationContext() {

@@ -1,6 +1,6 @@
 # StreetMap
 
-StreetMap is a Manifest V3 Chrome extension popup for community-shared local knowledge. Milestone 2 adds a small Google Maps context prototype. The current context may identify a place ID or explicit search coordinates from a supported URL; it does not verify the place shown in Google Maps. Sample notes remain fictional and generic, and are never represented as belonging to the current map.
+StreetMap is a Manifest V3 Chrome extension popup for community-shared local knowledge. Milestone 2 adds a small Google Maps URL-context prototype. It can distinguish broad area/search text, map-center coordinates, and an unverified place reference. It does not verify which place is selected in Maps. Sample notes remain fictional and generic, and are never represented as belonging to the current map.
 
 ## Requirements and commands
 
@@ -28,22 +28,17 @@ The production unpacked extension is written to `.output/chrome-mv3`. To load it
 
 ## Location context flow
 
-When the popup opens, or when **Refresh** is pressed, it reads the active tab after the user's extension action. For a supported Maps tab it sends a small typed request to the statically declared content script. The content script reads only its current `location.href`; it does not inspect the page DOM. The popup validates and normalizes the response before rendering it. A missing content script gets one short retry, then a clear error state.
+When the popup opens, or when **Refresh** is pressed, it reads the active tab after the user's extension action. For a supported Maps tab it sends a small typed request to the statically declared content script. The content script reads only its current `location.href`; it does not inspect the page DOM. The popup validates and normalizes the response before rendering it. If the static listener is absent (for example, Maps was already open when the extension was installed or reloaded), the popup injects the same packaged reader into that active Maps tab and retries once. If injection or the retry fails, it shows an error rather than treating the failure as missing context.
 
-The parser accepts only Google's documented Maps search URL form (`/maps/search/?api=1&query=...`) when it contains either:
+The parser uses only visible URL text. A `/maps/place/<label>/` route is displayed as **broad area/search context**; for example, `/maps/place/Greater+Noida,+Uttar+Pradesh/` yields the broad label “Greater Noida, Uttar Pradesh.” If the same URL includes `@latitude,longitude,zoomz`, those numbers are shown separately as **map-center coordinates**, never as the selected business's coordinates. A `/maps/search/?query=...` URL is broad search context. A documented `query_place_id` paired with a query is shown as a **specific place reference, unverified**; StreetMap does not infer or resolve a business name. Other Maps routes may have no reliable location context. See Google's [Maps URLs documentation](https://developers.google.com/maps/documentation/urls/get-started); its URL formats do not establish the visible website selection as verified.
 
-- `query_place_id` alongside the required query, shown as an **unverified place reference**; or
-- a query consisting only of valid latitude and longitude, shown as **search coordinates**.
-
-Google documents `query` as supporting both specific locations and broad searches. StreetMap therefore does not treat arbitrary query text as a selected place. It also ignores map-center coordinates and undocumented `/maps/place/.../@...` routes. Missing or malformed values remain unavailable; labels and coordinates are never inferred. See Google's [Maps URLs documentation](https://developers.google.com/maps/documentation/urls/get-started).
-
-This prototype does not resolve a place ID to a name, confirm the visible Maps selection, or detect every normal Maps UI route. Google's public URL docs define constructed links for searches, directions, map views, and Street View; they do not define the website's internal SPA routes as a place-selection API. StreetMap therefore leaves undocumented routes unconfirmed. Context is refreshed whenever the popup opens and on the Refresh button. If the URL changes while the popup remains open, press Refresh; there is no polling or stored location history.
+This prototype does not resolve a place ID to a name, confirm the visible Maps selection, or detect every Maps route. It uses no DOM selectors, internal application state, or private endpoints. Context is refreshed whenever the popup opens and on the Refresh button. If the URL changes while the popup remains open, press Refresh; there is no polling or stored location history.
 
 ## Permissions and privacy
 
 - `activeTab` lets the popup read the current tab URL in response to the user's toolbar click. StreetMap does not request the broad `tabs` permission.
-- The static content script matches HTTPS `/maps` pages on `www.google.com`, `maps.google.com`, and `www.google.co.in`. It runs only on those matched paths. No `<all_urls>`, geolocation, history, cookies, or backend access is requested. Chrome's site-access grant is scoped to the listed hosts; the content-script match paths limit where the script executes.
-- The popup sends no full URL to the content script. The content script returns only the supported hostname and a validated place ID or coordinate pair. Nothing is persisted or sent to a service.
+- The static content script matches HTTPS `/maps` pages on `google.com`, `www.google.com`, `maps.google.com`, and `www.google.co.in`. `scripting` is used only to inject that same local reader into the active supported Maps tab after the static listener fails to respond; `activeTab` limits this recovery to the tab the user invoked the popup from. No `<all_urls>`, geolocation, history, cookies, or backend access is requested.
+- The popup sends no full URL to the content script. The content script returns only a supported hostname and the parsed context fields (area/search label, map center, or unverified place ID). Nothing is persisted or sent to a service.
 
 The `activeTab` permission is temporary and tied to user invocation, as described in Chrome's [activeTab documentation](https://developer.chrome.com/docs/extensions/develop/concepts/activeTab). WXT's [content-script entrypoints](https://wxt.dev/guide/essentials/content-scripts) generate the MV3 content-script declaration from `src/entrypoints/google-maps.content.ts`.
 
@@ -51,11 +46,12 @@ The `activeTab` permission is temporary and tied to user invocation, as describe
 
 Use the WXT development browser profile or load the production directory as an unpacked extension:
 
-1. Open a non-Maps page, click StreetMap, and confirm **No Google Maps tab detected**.
-2. Open a supported Google Maps homepage or a broad search such as `coffee shops`; confirm the UI says Maps was detected without claiming a specific place.
-3. Open a documented Maps search URL with a valid `query_place_id` or coordinate-only `query`; confirm the popup labels the result as a URL reference and does not claim it verified the visible selection.
-4. Change the Maps URL, reopen the popup or press **Refresh**, and confirm the displayed context updates. Switch tabs and repeat.
-5. Search the demo notes and enter a query with no matches; confirm the existing filtering and empty state still work, and that notes remain labeled as samples unrelated to the map.
+1. Open a non-Maps page, click StreetMap, and confirm **Google Maps not detected**.
+2. Open a supported Google Maps URL without a recognized place/search/map-center signal; confirm the UI says Maps was detected but context is unavailable.
+3. Open `https://www.google.com/maps/place/Greater+Noida,+Uttar+Pradesh/@28.4983349,77.4334236,12z/`; confirm the broad area and separately labeled map center appear, without a selected-business claim.
+4. Open a search URL with `query=coffee+shops`, then a URL with a valid `query_place_id`; confirm search text remains broad context and the ID stays unverified.
+5. Change the Maps URL, reopen the popup or press **Refresh**, and confirm the displayed context updates. Switch tabs and repeat.
+6. Search the demo notes and enter a query with no matches; confirm the existing filtering and empty state still work, and that notes remain labeled as samples unrelated to the map.
 
 Pure parser, validation, permission-failure, missing-content-script, retry, and malformed-response cases are covered by `npm test`. The automated tests do not simulate Chrome's actual content-script injection or toolbar lifecycle; use the manual steps above for that browser check.
 
@@ -68,4 +64,4 @@ Pure parser, validation, permission-failure, missing-content-script, retry, and 
 - `src/popup/services/locationContext.ts` — isolated Chrome tab and message APIs.
 - `src/popup/data` — fictional demo notes.
 - `public/icons` — local toolbar PNGs.
-- `wxt.config.ts` — MV3 metadata and the `activeTab` permission.
+- `wxt.config.ts` — MV3 metadata and the narrowly scoped `activeTab` and `scripting` permissions.

@@ -9,6 +9,7 @@ interface ContextCopy {
   title: string;
   description: string;
   detail?: string;
+  secondaryDetail?: string;
 }
 
 function getContextCopy(context: LocationContext): ContextCopy {
@@ -16,37 +17,59 @@ function getContextCopy(context: LocationContext): ContextCopy {
     case 'loading':
       return {
         title: 'Checking this tab',
-        description: 'Looking for a supported Google Maps location reference.',
+        description: 'Checking this tab for Google Maps context.',
       };
     case 'maps-unavailable':
       return {
-        title: 'No Google Maps tab detected',
+        title: 'Google Maps not detected',
         description: 'Open Google Maps in this tab to explore local tips.',
       };
     case 'maps-no-location':
       return {
-        title: 'Google Maps detected',
-        description: 'Select a place on Google Maps to see its available context.',
+        title: 'Google Maps detected, but no reliable context',
+        description: 'Select a place or search an area to see its available URL context.',
       };
     case 'error':
-      return {
-        title: 'Unable to read location context',
-        description: "StreetMap couldn't identify this location. Try selecting the place again.",
-      };
-    case 'location-available':
-      if (context.location.kind === 'place-id') {
+      if (context.reason === 'active-tab') {
         return {
-          title: 'Place reference found',
-          description:
-            'This Maps link includes a place ID. StreetMap cannot verify the visible selection or resolve a place name yet.',
-          detail: `Place ID · ${context.location.placeId}`,
+          title: 'Unable to read location context',
+          description: "StreetMap couldn't read the active tab. Try reopening the popup.",
+        };
+      }
+      if (context.reason === 'content-script') {
+        return {
+          title: 'Unable to read location context',
+          description: "StreetMap couldn't start its Maps reader. Reload Google Maps and try again.",
         };
       }
       return {
-        title: 'Search coordinates found',
+        title: 'Unable to read location context',
+        description: "StreetMap received context it couldn't validate. Refresh and try again.",
+      };
+    case 'broad-area':
+      return {
+        title: 'Broad area/search context available',
         description:
-          'These coordinates come from a documented Maps search URL; they do not confirm the visible place selection.',
-        detail: `${context.location.latitude}, ${context.location.longitude}`,
+          context.source === 'place-path'
+            ? 'This is URL text for an area or place, not a verified business selection.'
+            : 'This is a search query, not a confirmed selected place.',
+        detail: `${context.source === 'place-path' ? 'URL area' : 'Search query'} · ${context.label}`,
+        ...(context.mapCenter
+          ? { secondaryDetail: `Map center · ${context.mapCenter.latitude}, ${context.mapCenter.longitude}` }
+          : {}),
+      };
+    case 'map-center':
+      return {
+        title: 'Map-center coordinates available',
+        description: 'These coordinates mark the map view center, not a selected business.',
+        detail: `${context.mapCenter.latitude}, ${context.mapCenter.longitude}`,
+      };
+    case 'unverified-place-reference':
+      return {
+        title: 'Specific place reference available (unverified)',
+        description:
+          'The URL contains a place ID. StreetMap has not verified the visible selection or resolved a name.',
+        detail: `Place ID · ${context.placeId}`,
       };
   }
 }
@@ -105,7 +128,10 @@ export default function LocationContextPanel({ context, onRefresh }: LocationCon
         </div>
         <p>{copy.description}</p>
         {copy.detail && <code className="context-detail">{copy.detail}</code>}
-        {context.status === 'location-available' && (
+        {copy.secondaryDetail && <code className="context-detail">{copy.secondaryDetail}</code>}
+        {(context.status === 'broad-area' ||
+          context.status === 'map-center' ||
+          context.status === 'unverified-place-reference') && (
           <span className="context-source">URL signal · {context.sourceHostname}</span>
         )}
       </div>

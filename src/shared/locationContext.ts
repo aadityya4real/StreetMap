@@ -1,10 +1,13 @@
 export const GOOGLE_MAPS_HOSTS = [
+  'google.com',
   'www.google.com',
   'maps.google.com',
   'www.google.co.in',
 ] as const;
 
 export const GOOGLE_MAPS_MATCH_PATTERNS = [
+  'https://google.com/maps',
+  'https://google.com/maps/*',
   'https://www.google.com/maps',
   'https://www.google.com/maps/*',
   'https://maps.google.com/maps',
@@ -20,29 +23,41 @@ export interface LocationContextRequest {
   type: typeof LOCATION_CONTEXT_REQUEST;
 }
 
+export interface MapCoordinates {
+  latitude: number;
+  longitude: number;
+}
+
 export interface MapsPageContext {
   status: 'maps-no-location';
   sourceHostname: SupportedMapsHostname;
 }
 
-export interface PlaceIdLocation {
-  kind: 'place-id';
+export interface BroadAreaContext {
+  status: 'broad-area';
+  sourceHostname: SupportedMapsHostname;
+  source: 'place-path' | 'search-query';
+  label: string;
+  mapCenter?: MapCoordinates;
+}
+
+export interface MapCenterContext {
+  status: 'map-center';
+  sourceHostname: SupportedMapsHostname;
+  mapCenter: MapCoordinates;
+}
+
+export interface UnverifiedPlaceReferenceContext {
+  status: 'unverified-place-reference';
+  sourceHostname: SupportedMapsHostname;
   placeId: string;
 }
 
-export interface CoordinateLocation {
-  kind: 'coordinates';
-  latitude: number;
-  longitude: number;
-}
-
-export interface AvailableLocationContext {
-  status: 'location-available';
-  sourceHostname: SupportedMapsHostname;
-  location: PlaceIdLocation | CoordinateLocation;
-}
-
-export type ContentLocationContext = MapsPageContext | AvailableLocationContext;
+export type ContentLocationContext =
+  | MapsPageContext
+  | BroadAreaContext
+  | MapCenterContext
+  | UnverifiedPlaceReferenceContext;
 
 export type LocationContext =
   | { status: 'loading' }
@@ -61,8 +76,10 @@ export interface LocationContextResponse {
 export type SupportedMapsHostname = (typeof GOOGLE_MAPS_HOSTS)[number];
 
 const MAPS_SEARCH_PATHS = new Set(['/maps/search', '/maps/search/']);
-const COORDINATE_QUERY_PATTERN = /^\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*,\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*$/;
+const PLACE_PATH_PATTERN = /^\/maps\/place\/([^/]+)(?:\/|$)/;
+const MAP_CENTER_PATH_PATTERN = /\/@([+-]?(?:\d+(?:\.\d*)?|\.\d+)),([+-]?(?:\d+(?:\.\d*)?|\.\d+)),(\d+(?:\.\d+)?)z(?:\/|$)/;
 const PLACE_ID_PATTERN = /^[a-zA-Z0-9_-]{1,256}$/;
+const MAX_CONTEXT_LABEL_LENGTH = 120;
 
 export function isSupportedMapsHostname(hostname: string): hostname is SupportedMapsHostname {
   return GOOGLE_MAPS_HOSTS.some((supportedHost) => hostname === supportedHost);
@@ -82,8 +99,8 @@ export function isGoogleMapsPageUrl(rawUrl: string): boolean {
 }
 
 /**
- * Parse only the documented Maps search URL format. General search text and
- * undocumented Maps UI routes do not prove that a particular place is selected.
+ * Read only public URL text. Place-route labels are broad context; `@lat,lng`
+ * is retained as map-center metadata and never as a selected-business location.
  */
 export function parseMapsPageUrl(rawUrl: string): ContentLocationContext | null {
   let url: URL;
@@ -98,53 +115,57 @@ export function parseMapsPageUrl(rawUrl: string): ContentLocationContext | null 
 
   const sourceHostname = url.hostname;
   if (!isSupportedMapsHostname(sourceHostname)) return null;
-  const apiVersions = url.searchParams.getAll('api');
-  const queries = url.searchParams.getAll('query');
-  const placeIds = url.searchParams.getAll('query_place_id');
 
-  if (
-    !MAPS_SEARCH_PATHS.has(url.pathname) ||
-    apiVersions.length !== 1 ||
-    apiVersions[0] !== '1' ||
-    queries.length !== 1 ||
-    queries[0]?.trim() === ''
-  ) {
-    return { status: 'maps-no-location', sourceHostname };
-  }
+  const mapCenter = parseMapCenter(url.pathname);
 
-  if (placeIds.length > 0) {
-    const placeId = placeIds[0];
-    if (placeIds.length === 1 && placeId && PLACE_ID_PATTERN.test(placeId)) {
+  if (MAPS_SEARCH_PATHS.has(url.pathname)) {
+    const queries = url.searchParams.getAll('query');
+    const placeIds = url.searchParams.getAll('query_place_id');
+    const apiVersions = url.searchParams.getAll('api');
+    const query = queries.length === 1 ? normalizeLabel(queries[0] ?? '') : null;
+
+    if (
+      apiVersions.length === 1 &&
+      apiVersions[0] === '1' &&
+      query &&
+      placeIds.length === 1 &&
+      placeIds[0] &&
+      PLACE_ID_PATTERN.test(placeIds[0])
+    ) {
       return {
-        status: 'location-available',
+        status: 'unverified-place-reference',
         sourceHostname,
-        location: { kind: 'place-id', placeId },
+        placeId: placeIds[0],
       };
     }
-    return { status: 'maps-no-location', sourceHostname };
+
+    if (query) {
+      return {
+        status: 'broad-area',
+        sourceHostname,
+        source: 'search-query',
+        label: query,
+        ...(mapCenter ? { mapCenter } : {}),
+      };
+    }
   }
 
-  const coordinateMatch = COORDINATE_QUERY_PATTERN.exec(queries[0] ?? '');
-  if (!coordinateMatch) return { status: 'maps-no-location', sourceHostname };
-
-  const latitude = Number(coordinateMatch[1]);
-  const longitude = Number(coordinateMatch[2]);
-  if (
-    !Number.isFinite(latitude) ||
-    !Number.isFinite(longitude) ||
-    latitude < -90 ||
-    latitude > 90 ||
-    longitude < -180 ||
-    longitude > 180
-  ) {
-    return { status: 'maps-no-location', sourceHostname };
+  const placeLabel = parsePlacePathLabel(url.pathname);
+  if (placeLabel) {
+    return {
+      status: 'broad-area',
+      sourceHostname,
+      source: 'place-path',
+      label: placeLabel,
+      ...(mapCenter ? { mapCenter } : {}),
+    };
   }
 
-  return {
-    status: 'location-available',
-    sourceHostname,
-    location: { kind: 'coordinates', latitude, longitude },
-  };
+  if (mapCenter) {
+    return { status: 'map-center', sourceHostname, mapCenter };
+  }
+
+  return { status: 'maps-no-location', sourceHostname };
 }
 
 export function isLocationContextRequest(value: unknown): value is LocationContextRequest {
@@ -169,39 +190,41 @@ export function parseLocationContextResponse(value: unknown): ContentLocationCon
     return { status: 'maps-no-location', sourceHostname: context.sourceHostname };
   }
 
-  if (context.status !== 'location-available' || !isRecord(context.location)) return null;
-
-  if (
-    context.location.kind === 'place-id' &&
-    typeof context.location.placeId === 'string' &&
-    PLACE_ID_PATTERN.test(context.location.placeId)
-  ) {
+  if (context.status === 'broad-area') {
+    const label = typeof context.label === 'string' ? normalizeLabel(context.label) : null;
+    if (
+      !label ||
+      (context.source !== 'place-path' && context.source !== 'search-query')
+    ) {
+      return null;
+    }
+    const mapCenter = context.mapCenter === undefined ? undefined : parseMapCoordinates(context.mapCenter);
+    if (context.mapCenter !== undefined && !mapCenter) return null;
     return {
-      status: 'location-available',
+      status: 'broad-area',
       sourceHostname: context.sourceHostname,
-      location: { kind: 'place-id', placeId: context.location.placeId },
+      source: context.source,
+      label,
+      ...(mapCenter ? { mapCenter } : {}),
     };
   }
 
+  if (context.status === 'map-center') {
+    const mapCenter = parseMapCoordinates(context.mapCenter);
+    return mapCenter
+      ? { status: 'map-center', sourceHostname: context.sourceHostname, mapCenter }
+      : null;
+  }
+
   if (
-    context.location.kind === 'coordinates' &&
-    typeof context.location.latitude === 'number' &&
-    Number.isFinite(context.location.latitude) &&
-    context.location.latitude >= -90 &&
-    context.location.latitude <= 90 &&
-    typeof context.location.longitude === 'number' &&
-    Number.isFinite(context.location.longitude) &&
-    context.location.longitude >= -180 &&
-    context.location.longitude <= 180
+    context.status === 'unverified-place-reference' &&
+    typeof context.placeId === 'string' &&
+    PLACE_ID_PATTERN.test(context.placeId)
   ) {
     return {
-      status: 'location-available',
+      status: 'unverified-place-reference',
       sourceHostname: context.sourceHostname,
-      location: {
-        kind: 'coordinates',
-        latitude: context.location.latitude,
-        longitude: context.location.longitude,
-      },
+      placeId: context.placeId,
     };
   }
 
@@ -211,11 +234,11 @@ export function parseLocationContextResponse(value: unknown): ContentLocationCon
 export interface LocationContextMessenger {
   getActiveTab(): Promise<{ id?: number; url?: string } | undefined>;
   requestContext(tabId: number): Promise<unknown>;
+  injectContentScript(tabId: number): Promise<void>;
 }
 
 export async function resolveActiveLocationContext(
   messenger: LocationContextMessenger,
-  retryDelayMs = 120,
 ): Promise<LocationContext> {
   let tab: { id?: number; url?: string } | undefined;
 
@@ -235,9 +258,14 @@ export async function resolveActiveLocationContext(
   let response: unknown;
   try {
     response = await messenger.requestContext(tab.id);
-  } catch {
-    await new Promise<void>((resolve) => setTimeout(resolve, retryDelayMs));
+  } catch (error) {
+    if (!isMissingContentScriptError(error)) {
+      return { status: 'error', reason: 'content-script' };
+    }
+    // Static content scripts are not retroactively added to an already-open tab.
+    // Recover only on the verified active Maps tab, then retry the same request once.
     try {
+      await messenger.injectContentScript(tab.id);
       response = await messenger.requestContext(tab.id);
     } catch {
       return { status: 'error', reason: 'content-script' };
@@ -252,6 +280,61 @@ export async function resolveActiveLocationContext(
   return context;
 }
 
+function parsePlacePathLabel(pathname: string): string | null {
+  const match = PLACE_PATH_PATTERN.exec(pathname);
+  if (!match?.[1]) return null;
+
+  try {
+    return normalizeLabel(decodeURIComponent(match[1].replaceAll('+', ' ')));
+  } catch {
+    return null;
+  }
+}
+
+function parseMapCenter(pathname: string): MapCoordinates | null {
+  const match = MAP_CENTER_PATH_PATTERN.exec(pathname);
+  if (!match) return null;
+
+  return parseMapCoordinates({ latitude: Number(match[1]), longitude: Number(match[2]) });
+}
+
+function parseMapCoordinates(value: unknown): MapCoordinates | null {
+  if (!isRecord(value)) return null;
+  const { latitude, longitude } = value;
+  if (
+    typeof latitude !== 'number' ||
+    !Number.isFinite(latitude) ||
+    latitude < -90 ||
+    latitude > 90 ||
+    typeof longitude !== 'number' ||
+    !Number.isFinite(longitude) ||
+    longitude < -180 ||
+    longitude > 180
+  ) {
+    return null;
+  }
+  return { latitude, longitude };
+}
+
+function normalizeLabel(value: string): string | null {
+  const withoutControls = Array.from(value)
+    .filter((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint > 0x1f && codePoint !== 0x7f;
+    })
+    .join('');
+  const label = withoutControls.replace(/\s+/g, ' ').trim();
+  return label.length > 0 && label.length <= MAX_CONTEXT_LABEL_LENGTH ? label : null;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isMissingContentScriptError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return (
+    error.message.includes('Receiving end does not exist') ||
+    error.message.includes('Could not establish connection')
+  );
 }
