@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"streetmap.in/backend/internal/notes"
 )
 
 type Pinger interface {
@@ -13,6 +15,7 @@ type Pinger interface {
 
 type Handler struct {
 	database         Pinger
+	noteReader       notes.Reader
 	logger           *slog.Logger
 	readinessTimeout time.Duration
 }
@@ -26,14 +29,15 @@ type readinessData struct {
 	Dependencies map[string]string `json:"dependencies"`
 }
 
-func NewHandler(database Pinger, logger *slog.Logger, readinessTimeout time.Duration) http.Handler {
+func NewHandler(database Pinger, noteReader notes.Reader, logger *slog.Logger, readinessTimeout time.Duration) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	handler := Handler{database: database, logger: logger, readinessTimeout: readinessTimeout}
+	handler := Handler{database: database, noteReader: noteReader, logger: logger, readinessTimeout: readinessTimeout}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/health", handler.health)
 	mux.HandleFunc("/api/v1/ready", handler.ready)
+	mux.HandleFunc("/api/v1/notes", handler.listNotes)
 	mux.HandleFunc("/", handler.notFound)
 	return requestLogger(logger, mux)
 }

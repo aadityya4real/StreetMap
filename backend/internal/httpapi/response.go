@@ -12,8 +12,9 @@ type envelope struct {
 }
 
 type apiError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code    string            `json:"code"`
+	Message string            `json:"message"`
+	Fields  map[string]string `json:"fields,omitempty"`
 }
 
 func writeSuccess(w http.ResponseWriter, status int, data any, logger *slog.Logger) {

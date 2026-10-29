@@ -1,6 +1,6 @@
 # StreetMap backend foundation
 
-This is an independent Go module for StreetMap's future shared API. It does not change or connect the WXT extension. The milestone provides the HTTP/runtime foundation, a PostgreSQL/PostGIS schema, and health/readiness checks; account authentication and note, vote, and report endpoints remain future work.
+This is an independent Go module for StreetMap's shared API. It does not change or connect the WXT extension. The backend provides health/readiness checks and a public read-only notes discovery endpoint over PostgreSQL/PostGIS. Authentication, individual note detail, mutations, voting, reporting, and moderation remain future work.
 
 ## Prerequisites
 
@@ -74,7 +74,19 @@ Configuration is read from environment variables:
 - `votes`: one row per `(note_id, user_id)` using a primary-key uniqueness constraint, so a user can have at most one active vote on a note.
 - `reports`: reporter, note, reason, status, and creation time. A partial unique index prevents duplicate open/reviewing reports by one user for one note while allowing a new report after resolution or dismissal.
 
-Partial indexes support published notes by exact location, author, and category; a GiST index supports spatial filtering, with btree indexes for vote and report lookups. A future nearby query should use `ST_DWithin(location.coordinates, selected_point, 5000)` and `ST_Distance` on geography values, return the originating location and distance, and order exact location matches ahead of nearby matches. Ranking and nearby discovery endpoints are not implemented here. No Maps data or coordinates are imported by this milestone.
+Partial indexes support published notes by exact location, author, and category; a GiST index supports spatial filtering, and migration `00002` adds a btree lookup for normalized location labels used by broad-area and unverified-label queries. Vote and report lookup indexes remain in place. Nearby discovery uses PostGIS geography with `ST_DWithin` and `ST_Distance`, includes the originating location and approximate distance, and returns exact results separately from nearby results. No Maps data or coordinates are imported by this milestone.
+
+## Public notes discovery
+
+`GET /api/v1/notes` accepts one of these context selectors:
+
+- `location_id=<uuid>`: exact notes for an existing `verified_place` StreetMap location; if fewer than three published notes exist and the place has coordinates, nearby notes within 5,000 m may supplement the response.
+- `context_type=broad_area&label=<label>`: same-type broad-area records with the same trimmed, case-insensitive label.
+- `context_type=place_page_unverified&label=<label>`: same-type unverified URL-label records only. Text equality is not identity verification; these matches are returned in `context_matches`, never as exact venue matches.
+- `context_type=map_center&latitude=<lat>&longitude=<lon>&radius_m=<1..5000>`: nearby notes only; map-center coordinates never produce exact-place results.
+- `context_type=coordinate&latitude=<lat>&longitude=<lon>`: exact equality against persisted user-confirmed `coordinate_only` locations; no proximity fallback.
+
+`limit` defaults to 20 and must be 1–50. Pagination uses validated context-bound keyset cursors. Requests with invalid or repeated parameters return `400 validation_error`; unknown verified location contexts return a generic `404`; database failures return a safe `500`. Public projections contain no emails, account state, or report details. See [`docs/architecture/api-contract.md`](../docs/architecture/api-contract.md) for the response contract and matching constraints.
 
 ## Tests
 
@@ -84,7 +96,7 @@ Run unit tests without Docker or a database:
 go test ./...
 ```
 
-The migration integration test skips unless `STREETMAP_TEST_DATABASE_URL` is set. It only accepts a dedicated database name ending in `_test`, applies the checked-in migrations, and verifies the tables and PostGIS extension. For the Compose database, create a disposable test database first:
+Migration and public-notes integration tests skip unless `STREETMAP_TEST_DATABASE_URL` is set. They only accept a dedicated database name ending in `_test`; migrations are applied there, and note fixtures are written inside a transaction that is rolled back. For the Compose database, create a dedicated test database first:
 
 ```sh
 docker compose exec db createdb -U streetmap streetmap_test
@@ -94,4 +106,4 @@ Then set `STREETMAP_TEST_DATABASE_URL` to the same local connection URL with dat
 
 ## Current boundaries
 
-No authentication, sessions, note creation, voting, moderation, nearby discovery, website, or extension/backend integration is implemented. There is no production API URL or deployment claim. The next milestone should define the public note-read API and identity/authentication model before either client connects.
+There is no authentication, session handling, note creation, voting, reporting, moderation, website, or extension/backend integration. The public notes endpoint is an unauthenticated read-only API and is not deployed at a production URL. Do not expose write routes until authentication, pending review state, and moderation are implemented.

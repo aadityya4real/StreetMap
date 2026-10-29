@@ -64,4 +64,16 @@ func TestMigrationsApplyToDedicatedPostgresDatabase(t *testing.T) {
 	if !postgisEnabled {
 		t.Error("migration did not enable PostGIS")
 	}
+
+	var labelIndexExists bool
+	if err := db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM pg_indexes
+			WHERE schemaname = 'public' AND indexname = 'locations_by_type_and_normalized_label'
+		)`).Scan(&labelIndexExists); err != nil {
+		t.Fatalf("check location-label index: %v", err)
+	}
+	if !labelIndexExists {
+		t.Error("migration did not create location-label index")
+	}
 }

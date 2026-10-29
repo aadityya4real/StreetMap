@@ -14,6 +14,7 @@ import (
 	"streetmap.in/backend/internal/config"
 	"streetmap.in/backend/internal/database"
 	"streetmap.in/backend/internal/httpapi"
+	"streetmap.in/backend/internal/notes"
 )
 
 func main() {
@@ -42,7 +43,7 @@ func run() error {
 
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.NewHandler(db, logger, cfg.ReadinessTimeout),
+		Handler:           httpapi.NewHandler(db, notes.NewPostgresReader(db), logger, cfg.ReadinessTimeout),
 		ReadHeaderTimeout: cfg.HTTPReadHeaderTimeout,
 		ReadTimeout:       cfg.HTTPReadTimeout,
 		WriteTimeout:      cfg.HTTPWriteTimeout,

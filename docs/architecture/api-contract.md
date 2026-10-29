@@ -1,7 +1,7 @@
 # StreetMap API contract (proposal)
 
-**Status:** design proposal for `/api/v1`; none of the resource endpoints below exist yet.
-**Current implementation:** `GET /api/v1/health`, `GET /api/v1/ready`, JSON envelopes, and JSON errors only.
+**Status:** the public note-discovery endpoint is implemented for exact verified locations, explicit coordinate contexts, broad-area labels, unverified place labels, and bounded map-center nearby searches. Note detail and all mutation endpoints remain proposals.
+**Current implementation:** `GET /api/v1/health`, `GET /api/v1/ready`, and `GET /api/v1/notes`, with JSON envelopes and validation errors.
 
 ## Contract conventions
 
@@ -10,7 +10,7 @@
 - JSON request bodies are UTF-8, capped at 16 KiB for note and report writes, decoded once, and reject unknown fields. Responses set JSON content type and `X-Content-Type-Options: nosniff`.
 - Public reads return only published notes and public author display names. They never include email, report details, hidden/removed/pending content, private moderation notes, or internal account status.
 - Mutations require a valid StreetMap user identity. The backend resolves author identity from authentication, never a caller-supplied `author_user_id`.
-- `limit` defaults to 20 and is clamped/rejected above 50. `cursor` is an opaque, signed or server-validated continuation token bound to the query and ordering. Stable ordering uses the primary sort key plus note UUID as a tie-breaker. Do not use offset pagination for a changing feed.
+- `limit` defaults to 20 and values outside 1–50 are rejected. `cursor` is a base64url continuation token whose format, phase, sort keys, and context hash are validated by the server and bound to the request context/order. It is pagination state, not an authorization or integrity credential. Stable ordering uses the primary sort key plus note UUID as a tie-breaker. Do not use offset pagination for a changing feed.
 - Validation failures are `400 validation_error` with field keys; malformed JSON is `400 invalid_json`; unauthenticated is `401 unauthenticated`; disallowed operation is `403 forbidden`; absent or non-public resource is `404 not_found`; uniqueness/state conflict is `409 conflict`; oversized body is `413 request_too_large`; throttling is `429 rate_limited` with `Retry-After`; unexpected errors are safe `500 internal_error`.
 
 ## Endpoint inventory
@@ -20,7 +20,7 @@
 | `GET /api/v1/health` | Public | Process liveness; current behavior retained. |
 | `GET /api/v1/ready` | Public | Dependency readiness; current behavior retained. |
 | `GET /api/v1/notes` | Public | Exact-context, broad-area, or bounded nearby note discovery. |
-| `GET /api/v1/notes/{note_id}` | Public | One published note. |
+| `GET /api/v1/notes/{note_id}` | Public (proposed) | One published note; not implemented in this milestone. |
 | `POST /api/v1/notes` | Authenticated | Submit a note for review. |
 | `PATCH /api/v1/notes/{note_id}` | Authenticated owner | Edit an eligible own note. |
 | `DELETE /api/v1/notes/{note_id}` | Authenticated owner | Soft-remove own note. |
@@ -31,7 +31,7 @@
 
 ## Discover notes
 
-`GET /api/v1/notes` accepts exactly one context selector. The server validates all inputs and applies the 5 km ceiling itself; client-provided limits are never authoritative.
+`GET /api/v1/notes` accepts exactly one context selector. The server validates all inputs and applies the 5 km ceiling itself; client-provided limits are never authoritative. Results are split into `exact`, `context_matches`, and `nearby` arrays so label-based results cannot be mistaken for verified exact-place results. The `context_matches` array contains same-type label matches for broad and unverified label requests; labels are trimmed and compared case-insensitively for exact equality, never fuzzy-matched.
 
 ### Known StreetMap location
 
@@ -43,19 +43,19 @@ Use `location_id` only when the client already has a StreetMap location identity
 
 `GET /api/v1/notes?context_type=broad_area&label=Greater%20Noida%2C%20Uttar%20Pradesh`
 
-Only broad-area notes may be returned as broad-context matches. A readable query does not become a selected venue. Broad areas currently have labels, not polygons or points; never use an invented centroid to make a proximity query.
+Only `broad_area` notes may be returned in `context_matches` for a broad-area request. A readable query does not become a selected venue. Broad areas currently have labels, not polygons or points; never use an invented centroid to make a proximity query. Matching is exact after trim and case folding. This is label-context matching, not proof that two broad labels denote the same administrative boundary.
 
 ### URL-derived place page
 
 `GET /api/v1/notes?context_type=place_page_unverified&label=GP%20Hotel%20%26%20Banquet`
 
-This label is an unverified URL reference, not verified identity. The API must not join it to a verified venue solely by text similarity. Current schema can store an `unverified_place_reference` label, but cannot store provider/provider-place ID on that type because of `locations_verified_provider`.
+This label is an unverified URL reference, not verified identity. The API may return only persisted `unverified_place_reference` notes with the same normalized label in `context_matches`. It never joins to a verified venue or computes proximity from the label. Exact label equality does not distinguish two different venues that happen to share a label; the response match type remains `unverified_reference_label`, not `exact_location`. Current schema cannot store provider/provider-place ID on this type because of `locations_verified_provider`; a stable reference identity requires a future schema decision.
 
 ### Map-center anchor
 
 `GET /api/v1/notes?context_type=map_center&latitude=26.8178068&longitude=80.9071453&radius_m=5000`
 
-The extension’s `@lat,lng` URL segment denotes the viewport center. Such coordinates are only a nearby-search anchor. They are never the selected venue coordinates and never yield `exact_location` results. Validate finite latitude in `[-90,90]`, longitude in `[-180,180]`; reject malformed or out-of-range values. `radius_m` defaults to 5000 and cannot exceed 5000.
+The extension’s `@lat,lng` URL segment denotes the viewport center. Such coordinates are only a nearby-search anchor. They are never the selected venue coordinates and never yield exact results. Validate finite latitude in `[-90,90]`, longitude in `[-180,180]`; reject malformed or out-of-range values. `radius_m` defaults to 5000 and is accepted only in the range 1–5000. The current request selects `map_center` alone; it does not combine a URL label with a nearby anchor for broad or unverified-label matching.
 
 ### Coordinate-only selection
 
@@ -65,7 +65,7 @@ Reserve this for a user-confirmed coordinate selection explicitly captured by a 
 
 ### Sparse exact results and response
 
-For `location_id` only, return exact published notes first. If fewer than a small threshold (proposed initial value: 3) are available, append up to 20 nearby published notes within 5,000 m when the location has a usable point. Threshold and cap should be configuration/constants, not caller-controlled. `map_center` requests return nearby results only; broad and unverified-label requests do not acquire nearby results unless a separately validated point anchor is explicitly supplied. The query should use PostGIS geography distance (`ST_DWithin`/`ST_Distance`) and include the originating location.
+For `location_id` only, return exact published notes first. If fewer than 3 are available, append up to 20 nearby published notes within 5,000 m when the verified location has a usable point. Three and twenty are conservative provisional implementation defaults, kept server-side constants rather than client policy. `map_center` requests return nearby results only; broad and unverified-label requests do not acquire nearby results. The query uses PostGIS geography distance (`ST_DWithin`/`ST_Distance`) and includes the originating location. Exact/context results order newest first with note UUID descending as a tie-breaker; nearby results order by distance ascending, then newest and note UUID descending. Each response page contains at most `limit` total notes across its result arrays.
 
 Example:
 
@@ -74,6 +74,7 @@ Example:
   "data": {
     "context": { "type": "map_center", "label": "GP Hotel & Banquet" },
     "exact": [],
+    "context_matches": [],
     "nearby": [
       {
         "id": "8bc2b4ce-4277-4139-825d-c559694c8524",
@@ -95,7 +96,7 @@ Example:
 }
 ```
 
-`context.type` and `match.type` are server-defined provenance. Nearby results are in their own collection, have a distance and source label, and must never be rendered as notes about the selected place. A nearby query must exclude non-published notes and use bounded query time/results. If the context is insufficient, return an empty `exact`/`nearby` response with a context explanation; do not guess a location.
+`context.type` and `match.type` are server-defined provenance. `exact` is used only for a verified StreetMap `location_id` or an exact persisted coordinate-only point; label-based results use `context_matches` with `broad_area` or `unverified_reference_label`. Nearby results are in their own collection, have a distance and source label, and must never be rendered as notes about the selected place. The public response exposes only note content, author display name, timestamp, helpful-vote count, and match provenance; it does not expose email, account status, or reports. A nearby query excludes non-published notes and is bounded to a three-second database context and a page limit of 50. When no matches exist, return empty arrays and the requested context; do not guess a location.
 
 `GET /api/v1/notes/{note_id}` returns `{ "data": { "note": ... } }` for a published note. A hidden, removed, pending, rejected, or unknown note is indistinguishable to a public caller (`404`).
 

@@ -1,6 +1,6 @@
 # StreetMap implementation roadmap
 
-This order follows the current dependency graph: the backend is Go `net/http` with health/readiness only, the schema has user/location/note/vote/report tables but no auth identity or moderation audit, and the extension remains on demo data. Each milestone should be separately reviewable and tested; this document creates no code or database changes.
+This order follows the current dependency graph: the backend is Go `net/http` with health/readiness and public note discovery, the schema has user/location/note/vote/report tables but no auth identity or moderation audit, and the extension remains on demo data. Each milestone should be separately reviewable and tested.
 
 ## Stage 4 / Stage 5A — Contract and provider decision (complete as documentation)
 
@@ -32,12 +32,12 @@ This order follows the current dependency graph: the backend is Go `net/http` wi
 - Add tests for wrong issuer/audience/signature/expiry, replayed state/code, account linking, suspended/deleted accounts, token revocation, CSRF and callback allowlists.
 - Do not ship note mutations until every path uses backend-derived identity and authorization.
 
-## Stage 7 — Public read API
+## Stage 7 — Public read API (in progress)
 
-- Implement `GET /api/v1/notes` and `GET /api/v1/notes/{id}` with published-only projection, opaque cursor pagination, bounded result/body size, safe envelopes, and strict filters.
-- Implement distinct exact, broad, place-reference and nearby context semantics. Enforce 5,000 m maximum and separate nearby result provenance/distance.
-- Add query plan/index checks and tests proving URL map center is never treated as exact venue identity or coordinates.
-- Preserve health/readiness response behavior and JSON middleware conventions.
+- Implemented `GET /api/v1/notes` for verified location IDs, exact coordinate-only matches, strict-label broad/unverified context matches, and bounded map-center nearby search. Public projection includes only note fields, author display name, helpful count, and match provenance.
+- Implemented stable keyset pagination, a 50-result page limit, published-only filtering, exact-before-nearby grouping, 5,000 m server ceiling, 20-note sparse-result nearby cap, and a normalized label index migration.
+- Remaining: implement `GET /api/v1/notes/{id}` if it remains useful to product clients; check query plans using representative production-shaped data and continue contract review before client integration.
+- Integration tests run against a dedicated `_test` PostGIS database. The extension remains on demo data and no API URL is configured in the client.
 
 ## Stage 8 — Note submission and ownership
 
@@ -74,4 +74,4 @@ This order follows the current dependency graph: the backend is Go `net/http` wi
 
 ## Immediate next milestone
 
-Continue **Stage 5B: Auth0 preflight and schema readiness**. Provider documentation supports the proposed protocols, but no Auth0 tenant, stable extension ID, production email sender, extension flow, website session, or Go token validation is configured or tested. Resolve the tenant/email budget and topology, then run and record every Stage 5B smoke test in a test tenant/build. If the exact Chrome callback/PKCE/audience flow fails, revisit the provider decision before writing auth code. Separately design and verify identity/session and note-moderation/location-reference migrations on a dedicated disposable PostGIS test database. **Do not begin Stage 6** until both provider and schema gates pass. Do not connect demo-note UI to the API or expose note writes until authentication and authorization are verified.
+Complete Stage 7 by deciding whether public clients need `GET /api/v1/notes/{id}` and reviewing the query plan/index behavior with representative data. Keep the extension disconnected until a separate integration milestone is approved. Stage 5B Auth0 tenant/email decisions and smoke tests remain a gate before Stage 6 authentication; do not expose note writes until authentication, pending-state moderation, and authorization are implemented and verified.

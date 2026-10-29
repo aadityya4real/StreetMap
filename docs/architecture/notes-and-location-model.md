@@ -1,6 +1,6 @@
 # Notes, location context, and moderation model
 
-**Status:** proposed behavior aligned to the existing first migration. No schema change is made here.
+**Status:** behavior aligned to the existing persisted model and the public read implementation. Migration `00002` adds a normalized location-label lookup index; no other schema shape changes are made here.
 
 ## Existing persisted model
 
@@ -9,12 +9,12 @@
 | Table | Current facts and constraints |
 | --- | --- |
 | `users` | UUID; unique generated normalized email; display name 1–80 chars; status `active`, `suspended`, `deleted`; no credentials or external identity mapping. |
-| `locations` | UUID; types `verified_place`, `unverified_place_reference`, `broad_area`, `coordinate_only`; label 1–200; optional PostGIS `geography(Point,4326)`; provider and provider-place ID must be paired and are allowed only for `verified_place`; coordinate-only requires a point, while unverified and broad types cannot carry coordinates. Provider/place ID is unique; coordinate GiST index exists. |
+| `locations` | UUID; types `verified_place`, `unverified_place_reference`, `broad_area`, `coordinate_only`; label 1–200; optional PostGIS `geography(Point,4326)`; provider and provider-place ID must be paired and are allowed only for `verified_place`; coordinate-only requires a point, while unverified and broad types cannot carry coordinates. Provider/place ID is unique; coordinate GiST and `(location_type, lower(btrim(display_label)))` lookup indexes exist after migration 00002. |
 | `notes` | UUID; required author and location FKs with `ON DELETE RESTRICT`; title 3–120; body 1–5000; categories `hidden_gem`, `shortcut`, `local_tip`, `parking`, `warning`; status defaults to `published` and allows only `published`, `hidden`, `removed`; created/updated timestamps and update trigger. |
 | `votes` | One `helpful` row per `(note_id,user_id)` via primary key; FKs restrict deletion. |
 | `reports` | Reason 1–1000; statuses `open`, `reviewing`, `resolved`, `dismissed`, `actioned`; unique active report per reporter/note while open or reviewing; note/status index. |
 
-The current Go API has no note, auth, vote, report, or moderation routes. The extension does not call this API and uses separate demo notes. Its public-URL parser distinguishes `broad-area`, `place-page-unverified`, `map-center`, `unverified-place-reference`, `maps-no-location`, and `maps-unavailable` plus errors. It reads the URL only; do not expand it into DOM scraping or undocumented Maps state.
+The Go API now exposes public `GET /api/v1/notes` discovery; note detail, auth, vote, report, mutation, and moderation routes are still absent. The extension does not call this API and uses separate demo notes. Its public-URL parser distinguishes `broad-area`, `place-page-unverified`, `map-center`, `unverified-place-reference`, `maps-no-location`, and `maps-unavailable` plus errors. It reads the URL only; do not expand it into DOM scraping or undocumented Maps state.
 
 ## Location evidence and query policy
 
@@ -29,16 +29,17 @@ Represent evidence strength explicitly in storage and every response. A UI/parse
 | User-confirmed coordinate | No current signal | Can map to `coordinate_only` with a point only after explicit user selection and consent. | Coordinate context, not a named business. |
 | Place ID in URL query | `unverified-place-reference` | Unverified external reference; it is not validated against provider data by current parser. Never treat as an internal ID or verified identity. | Specific place reference available, unverified. |
 
-For `place-page-unverified`, the extension can send the extracted label and optional map-center separately. For broad search, send broad query text and optional center separately. For `map-center`, send the point only with an explicit `context_type=map_center`. Never infer a selected point from route display text or a viewport center. If there is no reliable context, do not call discovery with fabricated values.
+The current API accepts one context selector per request. For `place-page-unverified`, send the extracted label with `context_type=place_page_unverified`; for broad search, send broad query text with `context_type=broad_area`; and for viewport coordinates, send only `context_type=map_center` with latitude/longitude. These are separate requests because a label plus a viewport anchor is not currently represented as one combined context. Never infer a selected point from route display text or a viewport center. If there is no reliable context, do not call discovery with fabricated values.
 
 ### Exact and nearby results
 
-- Exact means the note references the same StreetMap location UUID and the client requested that UUID. A label equality or point proximity is never exact identity.
+- `exact_location` means the note references the same verified StreetMap location UUID and the client requested that UUID. `exact_coordinate` is allowed only when a user-confirmed coordinate request exactly equals a persisted `coordinate_only` point; it is not a proximity match. A label equality or viewport-center proximity is never exact venue identity.
+- Broad and unverified URL-label matches are returned in a distinct `context_matches` collection, never the `exact` collection. Matching uses same location type and exact label equality after trim and case folding. This cannot disambiguate different venues with an identical unverified label; the match remains explicitly `unverified_reference_label` and must not be described as verified identity.
 - Return exact results first. Nearby results are a distinct array with `match.type = nearby`, source location label, and computed distance in meters. Never blend them into the selected place’s note list without a visible nearby designation.
-- Proposed nearby radius is at most 5,000 meters, enforced server-side. Use PostGIS `geography` distance, `ST_DWithin` for index-assisted filtering, and `ST_Distance` for display; do not round in a way that implies survey precision. A URL viewport center can only anchor nearby candidates.
+- Nearby radius is at most 5,000 meters, enforced server-side. The current API uses PostGIS `geography`, `ST_DWithin` for index-assisted filtering, and `ST_Distance` for ordering; the reported distance is rounded to the nearest 10 meters to avoid implying survey precision. A URL viewport center can only anchor nearby candidates.
 - Nearby notes supplement sparse exact results only for a verified point/location, when fewer than the initial proposed threshold of 3 published exact notes exist. A place label and broad area have no reliable point in the present schema and do not qualify. A broad context may return broad-area notes labeled broad; it must not trigger an invented centroid query.
-- Candidate nearby notes must themselves have persisted points. Ignore missing points; return zero nearby results if query origin or candidates lack coordinates. Apply maximum count, query timeout, deterministic ordering, and pagination.
-- Suggested ranking: exact first; then nearby ordered by a quality score with vote volume and recency smoothing. Do not let raw vote count alone determine rank. Exclude self-votes in transaction and in any score. Distance is a separate relevance signal; do not label proximity as relevance to a business.
+- Candidate nearby notes must themselves have persisted points. Ignore missing points; return zero nearby results if query origin or candidates lack coordinates. The current API uses a three-second query context, deterministic keyset pagination, and a maximum of 20 supplemental nearby notes for sparse exact-location results. Map-center requests return nearby results only and are page-bounded by `limit`.
+- Future ranking may use a quality score with vote volume and recency smoothing; the current public API uses deterministic newest-first ordering within exact/context groups and distance-first ordering for nearby results. Do not let raw vote count alone determine rank. Exclude self-votes in transaction and in any score. Distance is a separate relevance signal; do not label proximity as relevance to a business.
 
 ## Note lifecycle and moderation
 
