@@ -104,6 +104,153 @@ input:focus-visible {
   color: #b8bcb8;
 }
 
+.location-context {
+  flex: 0 0 auto;
+  padding: 13px var(--space-5) 12px;
+  border-bottom: 1px solid var(--color-line);
+  background: #fbfbf8;
+}
+
+.location-context-heading {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.context-icon {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  color: #735d26;
+  background: #f6edcf;
+}
+
+.context-icon svg {
+  width: 19px;
+  height: 19px;
+}
+
+.context-heading-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.context-heading-copy .eyebrow {
+  margin-bottom: 2px;
+  font-size: 8px;
+}
+
+.context-heading-copy h2 {
+  margin-bottom: 0;
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.context-refresh {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: #727872;
+  background: transparent;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 650;
+  transition: color 140ms ease, background-color 140ms ease, border-color 140ms ease;
+}
+
+.context-refresh:hover:not(:disabled) {
+  border-color: #e3e4dd;
+  color: var(--color-ink);
+  background: var(--color-white);
+}
+
+.context-refresh:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.context-refresh svg {
+  width: 15px;
+  height: 15px;
+}
+
+.context-result {
+  margin: 8px 0 0 39px;
+  padding-left: 10px;
+  border-left: 2px solid #e3dfd1;
+}
+
+.context-result-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #454b46;
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.context-result p {
+  margin: 3px 0 0;
+  color: #717872;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.context-status-dot,
+.context-loading-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: #a4aaa4;
+}
+
+.context-result-maps-no-location .context-status-dot {
+  background: #d0a638;
+}
+
+.context-result-location-available .context-status-dot {
+  background: #56836b;
+}
+
+.context-result-error .context-status-dot {
+  background: #b95549;
+}
+
+.context-loading-dot {
+  width: 8px;
+  height: 8px;
+  flex-basis: 8px;
+  border: 1.5px solid #e6dfc9;
+  border-top-color: #ad8628;
+  background: transparent;
+  animation: spin 900ms linear infinite;
+}
+
+.context-detail {
+  display: block;
+  margin-top: 5px;
+  overflow-wrap: anywhere;
+  color: #514a38;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.context-source {
+  display: block;
+  margin-top: 4px;
+  color: #969b96;
+  font-size: 8px;
+}
+
 .popup-main {
   display: flex;
   min-height: 0;

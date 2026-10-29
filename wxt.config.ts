@@ -11,6 +11,7 @@ export default defineConfig({
     name: 'StreetMap',
     description: 'Discover useful local knowledge shared by the community.',
     version: '0.1.0',
+    permissions: ['activeTab'],
     icons: {
       16: 'icons/icon-16.png',
       32: 'icons/icon-32.png',

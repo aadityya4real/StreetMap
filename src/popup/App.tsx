@@ -1,18 +1,32 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import Header from './components/Header';
+import LocationContextPanel from './components/LocationContextPanel';
 import NotesList from './components/NotesList';
 import SearchInput from './components/SearchInput';
 import { demoNotes } from './data/demoNotes';
 import { useNoteSearch } from './hooks/useNoteSearch';
+import { getActiveLocationContext } from './services/locationContext';
+import type { LocationContext } from '../shared/locationContext';
 
 export default function App() {
   const [query, setQuery] = useState('');
   const [shareMessage, setShareMessage] = useState('');
+  const [locationContext, setLocationContext] = useState<LocationContext>({ status: 'loading' });
   const visibleNotes = useNoteSearch(demoNotes, query);
+
+  const refreshLocationContext = useCallback(async () => {
+    setLocationContext({ status: 'loading' });
+    setLocationContext(await getActiveLocationContext());
+  }, []);
+
+  useEffect(() => {
+    void refreshLocationContext();
+  }, [refreshLocationContext]);
 
   return (
     <div className="popup-shell">
       <Header />
+      <LocationContextPanel context={locationContext} onRefresh={() => void refreshLocationContext()} />
       <main className="popup-main" id="community-notes">
         <div className="section-heading">
           <div>
