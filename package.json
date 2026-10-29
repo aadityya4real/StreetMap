@@ -9,7 +9,7 @@
     "build": "wxt build",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test tests/locationContext.test.mjs"
+    "test": "node --import tsx --test tests/*.test.mjs"
   },
   "dependencies": {
     "react": "^19.3.1",
@@ -22,6 +22,8 @@
     "@vitejs/plugin-react": "^6.1.2",
     "eslint": "^10.13.0",
     "globals": "^17.13.0",
+    "happy-dom": "^21.0.4",
+    "tsx": "^4.23.15",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.72.1",
     "vite": "^8.3.5",

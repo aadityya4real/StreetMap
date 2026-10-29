@@ -12,6 +12,9 @@ export default defineConfig({
     description: 'Discover useful local knowledge shared by the community.',
     version: '0.1.0',
     permissions: ['activeTab', 'scripting'],
+    ...(process.env.NODE_ENV === 'development'
+      ? { host_permissions: ['http://127.0.0.1:8080/*'] }
+      : {}),
     icons: {
       16: 'icons/icon-16.png',
       32: 'icons/icon-32.png',
