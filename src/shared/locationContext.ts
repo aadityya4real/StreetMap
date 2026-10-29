@@ -36,7 +36,14 @@ export interface MapsPageContext {
 export interface BroadAreaContext {
   status: 'broad-area';
   sourceHostname: SupportedMapsHostname;
-  source: 'place-path' | 'search-query';
+  source: 'search-query';
+  label: string;
+  mapCenter?: MapCoordinates;
+}
+
+export interface PlacePageContext {
+  status: 'place-page-unverified';
+  sourceHostname: SupportedMapsHostname;
   label: string;
   mapCenter?: MapCoordinates;
 }
@@ -56,6 +63,7 @@ export interface UnverifiedPlaceReferenceContext {
 export type ContentLocationContext =
   | MapsPageContext
   | BroadAreaContext
+  | PlacePageContext
   | MapCenterContext
   | UnverifiedPlaceReferenceContext;
 
@@ -77,7 +85,7 @@ export type SupportedMapsHostname = (typeof GOOGLE_MAPS_HOSTS)[number];
 
 const MAPS_SEARCH_PATHS = new Set(['/maps/search', '/maps/search/']);
 const PLACE_PATH_PATTERN = /^\/maps\/place\/([^/]+)(?:\/|$)/;
-const MAP_CENTER_PATH_PATTERN = /\/@([+-]?(?:\d+(?:\.\d*)?|\.\d+)),([+-]?(?:\d+(?:\.\d*)?|\.\d+)),(\d+(?:\.\d+)?)z(?:\/|$)/;
+const MAP_CENTER_PATH_PATTERN = /\/@([+-]?(?:\d+(?:\.\d*)?|\.\d+)),([+-]?(?:\d+(?:\.\d*)?|\.\d+))(?:,(\d+(?:\.\d+)?)z)?(?:\/|$)/;
 const PLACE_ID_PATTERN = /^[a-zA-Z0-9_-]{1,256}$/;
 const MAX_CONTEXT_LABEL_LENGTH = 120;
 
@@ -99,8 +107,8 @@ export function isGoogleMapsPageUrl(rawUrl: string): boolean {
 }
 
 /**
- * Read only public URL text. Place-route labels are broad context; `@lat,lng`
- * is retained as map-center metadata and never as a selected-business location.
+ * Read only public URL text. Place-route labels are unverified URL-derived
+ * references; `@lat,lng` is map-center metadata, never a business location.
  */
 export function parseMapsPageUrl(rawUrl: string): ContentLocationContext | null {
   let url: URL;
@@ -153,9 +161,8 @@ export function parseMapsPageUrl(rawUrl: string): ContentLocationContext | null 
   const placeLabel = parsePlacePathLabel(url.pathname);
   if (placeLabel) {
     return {
-      status: 'broad-area',
+      status: 'place-page-unverified',
       sourceHostname,
-      source: 'place-path',
       label: placeLabel,
       ...(mapCenter ? { mapCenter } : {}),
     };
@@ -192,10 +199,7 @@ export function parseLocationContextResponse(value: unknown): ContentLocationCon
 
   if (context.status === 'broad-area') {
     const label = typeof context.label === 'string' ? normalizeLabel(context.label) : null;
-    if (
-      !label ||
-      (context.source !== 'place-path' && context.source !== 'search-query')
-    ) {
+    if (!label || context.source !== 'search-query') {
       return null;
     }
     const mapCenter = context.mapCenter === undefined ? undefined : parseMapCoordinates(context.mapCenter);
@@ -204,6 +208,19 @@ export function parseLocationContextResponse(value: unknown): ContentLocationCon
       status: 'broad-area',
       sourceHostname: context.sourceHostname,
       source: context.source,
+      label,
+      ...(mapCenter ? { mapCenter } : {}),
+    };
+  }
+
+  if (context.status === 'place-page-unverified') {
+    const label = typeof context.label === 'string' ? normalizeLabel(context.label) : null;
+    if (!label) return null;
+    const mapCenter = context.mapCenter === undefined ? undefined : parseMapCoordinates(context.mapCenter);
+    if (context.mapCenter !== undefined && !mapCenter) return null;
+    return {
+      status: 'place-page-unverified',
+      sourceHostname: context.sourceHostname,
       label,
       ...(mapCenter ? { mapCenter } : {}),
     };

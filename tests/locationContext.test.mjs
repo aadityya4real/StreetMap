@@ -27,23 +27,36 @@ test('supports the exact www and apex Google Maps hosts in code and manifest mat
   assert.equal(isGoogleMapsPageUrl('https://example.com/maps'), false);
 });
 
-test('Greater Noida place route is broad area context with distinct map-center coordinates', () => {
-  assert.deepEqual(parseMapsPageUrl(greaterNoidaUrl), {
-    status: 'broad-area',
+test('GP Hotel place page decodes plus signs and encoded ampersands, with a separate map center', () => {
+  const venueUrl =
+    'https://www.google.com/maps/place/GP+Hotel+%26+Banquet/@26.8178068,80.9071453,15.26z/data=!4m2!3m1!1s0x0';
+  const context = parseMapsPageUrl(venueUrl);
+  assert.deepEqual(context, {
+    status: 'place-page-unverified',
     sourceHostname: 'www.google.com',
-    source: 'place-path',
-    label: 'Greater Noida, Uttar Pradesh',
-    mapCenter: { latitude: 28.4983349, longitude: 77.4334236 },
+    label: 'GP Hotel & Banquet',
+    mapCenter: { latitude: 26.8178068, longitude: 80.9071453 },
   });
+  assert.equal(context?.status === 'place-page-unverified' && 'coordinates' in context, false);
 });
 
-test('a place route without coordinates remains broad context and invents no point', () => {
+test('place-page labels decode percent-encoded spaces and remain unverified', () => {
+  assert.deepEqual(
+    parseMapsPageUrl('https://www.google.com/maps/place/Cafe%20with%20a%20View/'),
+    {
+      status: 'place-page-unverified',
+      sourceHostname: 'www.google.com',
+      label: 'Cafe with a View',
+    },
+  );
+});
+
+test('a place route without coordinates remains unverified and invents no point', () => {
   assert.deepEqual(
     parseMapsPageUrl('https://www.google.com/maps/place/Greater+Noida,+Uttar+Pradesh/'),
     {
-      status: 'broad-area',
+      status: 'place-page-unverified',
       sourceHostname: 'www.google.com',
-      source: 'place-path',
       label: 'Greater Noida, Uttar Pradesh',
     },
   );
@@ -69,6 +82,13 @@ test('a general Maps search is broad search context, not a confirmed selection',
   });
 });
 
+test('Maps homepage has no reliable place context', () => {
+  assert.deepEqual(parseMapsPageUrl('https://www.google.com/maps'), {
+    status: 'maps-no-location',
+    sourceHostname: 'www.google.com',
+  });
+});
+
 test('coordinate search text is not confused with a map-center coordinate', () => {
   assert.deepEqual(parseMapsPageUrl(`${mapsSearchUrl}?api=1&query=28.5%2C77.4`), {
     status: 'broad-area',
@@ -91,23 +111,33 @@ test('documented query_place_id is a specific but unverified reference', () => {
   );
 });
 
-test('unsupported routes, missing query fields, and invalid map-center coordinates stay unconfirmed', () => {
-  assert.equal(parseMapsPageUrl('https://www.google.com/maps')?.status, 'maps-no-location');
+test('invalid map-center coordinates are omitted from place context and rejected by themselves', () => {
+  const placeWithInvalidCenter = parseMapsPageUrl(
+    'https://www.google.com/maps/place/GP+Hotel/@91,0,15z/',
+  );
+  assert.deepEqual(placeWithInvalidCenter, {
+    status: 'place-page-unverified',
+    sourceHostname: 'www.google.com',
+    label: 'GP Hotel',
+  });
+  assert.equal(parseMapsPageUrl('https://www.google.com/maps/@91,0,12z')?.status, 'maps-no-location');
+});
+
+test('unsupported routes and missing query fields stay without reliable context', () => {
   assert.equal(parseMapsPageUrl('https://www.google.com/maps/dir/Origin/Target')?.status, 'maps-no-location');
   assert.equal(parseMapsPageUrl(`${mapsSearchUrl}?api=1&query_place_id=somePlaceId`)?.status, 'maps-no-location');
-  assert.equal(
-    parseMapsPageUrl('https://www.google.com/maps/@91,0,12z')?.status,
-    'maps-no-location',
+});
+
+test('malformed percent encoding does not become a place label; valid center remains separate', () => {
+  assert.deepEqual(
+    parseMapsPageUrl('https://www.google.com/maps/place/GP+Hotel+%2G/@26.8,80.9,15z/'),
+    {
+      status: 'map-center',
+      sourceHostname: 'www.google.com',
+      mapCenter: { latitude: 26.8, longitude: 80.9 },
+    },
   );
-  const broadWithInvalidCenter = parseMapsPageUrl(
-    'https://www.google.com/maps/place/Greater+Noida/@91,0,12z/',
-  );
-  assert.deepEqual(broadWithInvalidCenter, {
-    status: 'broad-area',
-    sourceHostname: 'www.google.com',
-    source: 'place-path',
-    label: 'Greater Noida',
-  });
+  assert.equal(parseMapsPageUrl('https://[invalid-url'), null);
 });
 
 test('validates and normalizes content-script context from untrusted input', () => {
@@ -115,7 +145,7 @@ test('validates and normalizes content-script context from untrusted input', () 
     response({
       status: 'broad-area',
       sourceHostname: 'www.google.com',
-      source: 'place-path',
+      source: 'search-query',
       label: ' Greater   Noida, Uttar Pradesh ',
       mapCenter: { latitude: 28.5, longitude: 77.4, extra: 'ignored' },
       extra: 'ignored',
@@ -124,7 +154,7 @@ test('validates and normalizes content-script context from untrusted input', () 
   assert.deepEqual(valid, {
     status: 'broad-area',
     sourceHostname: 'www.google.com',
-    source: 'place-path',
+    source: 'search-query',
     label: 'Greater Noida, Uttar Pradesh',
     mapCenter: { latitude: 28.5, longitude: 77.4 },
   });
@@ -140,7 +170,7 @@ test('validates and normalizes content-script context from untrusted input', () 
   );
   assert.equal(
     parseLocationContextResponse(
-      response({ status: 'broad-area', sourceHostname: 'www.google.com', source: 'place-path', label: '<script>' }),
+      response({ status: 'broad-area', sourceHostname: 'www.google.com', source: 'search-query', label: '<script>' }),
     )?.status,
     'broad-area',
   );
@@ -178,9 +208,8 @@ test('recovers an already-open Maps tab by injecting the packaged script once', 
   let requests = 0;
   let injections = 0;
   const context = {
-    status: 'broad-area',
+    status: 'place-page-unverified',
     sourceHostname: 'www.google.com',
-    source: 'place-path',
     label: 'Greater Noida, Uttar Pradesh',
     mapCenter: { latitude: 28.4983349, longitude: 77.4334236 },
   };

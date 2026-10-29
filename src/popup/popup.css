@@ -217,6 +217,7 @@ input:focus-visible {
 }
 
 .context-result-broad-area .context-status-dot,
+.context-result-place-page-unverified .context-status-dot,
 .context-result-map-center .context-status-dot,
 .context-result-unverified-place-reference .context-status-dot {
   background: #56836b;

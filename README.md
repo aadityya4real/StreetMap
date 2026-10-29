@@ -1,6 +1,6 @@
 # StreetMap
 
-StreetMap is a Manifest V3 Chrome extension popup for community-shared local knowledge. Milestone 2 adds a small Google Maps URL-context prototype. It can distinguish broad area/search text, map-center coordinates, and an unverified place reference. It does not verify which place is selected in Maps. Sample notes remain fictional and generic, and are never represented as belonging to the current map.
+StreetMap is a Manifest V3 Chrome extension popup for community-shared local knowledge. Milestone 2 adds a small Google Maps URL-context prototype. It distinguishes broad area/search text, an unverified URL-derived place-page label, map-center coordinates, and an unverified place reference. It does not verify which place is selected in Maps. Sample notes remain fictional and generic, and are never represented as belonging to the current map.
 
 ## Requirements and commands
 
@@ -30,7 +30,7 @@ The production unpacked extension is written to `.output/chrome-mv3`. To load it
 
 When the popup opens, or when **Refresh** is pressed, it reads the active tab after the user's extension action. For a supported Maps tab it sends a small typed request to the statically declared content script. The content script reads only its current `location.href`; it does not inspect the page DOM. The popup validates and normalizes the response before rendering it. If the static listener is absent (for example, Maps was already open when the extension was installed or reloaded), the popup injects the same packaged reader into that active Maps tab and retries once. If injection or the retry fails, it shows an error rather than treating the failure as missing context.
 
-The parser uses only visible URL text. A `/maps/place/<label>/` route is displayed as **broad area/search context**; for example, `/maps/place/Greater+Noida,+Uttar+Pradesh/` yields the broad label “Greater Noida, Uttar Pradesh.” If the same URL includes `@latitude,longitude,zoomz`, those numbers are shown separately as **map-center coordinates**, never as the selected business's coordinates. A `/maps/search/?query=...` URL is broad search context. A documented `query_place_id` paired with a query is shown as a **specific place reference, unverified**; StreetMap does not infer or resolve a business name. Other Maps routes may have no reliable location context. See Google's [Maps URLs documentation](https://developers.google.com/maps/documentation/urls/get-started); its URL formats do not establish the visible website selection as verified.
+The parser uses only visible URL text. A `/maps/place/<label>/` route is displayed as **Place page detected (unverified)**; its safely decoded label comes from the URL and is not an independently verified venue identity. If the same URL includes `@latitude,longitude,zoomz`, those numbers are shown separately as **map-center coordinates**, never as the venue's exact coordinates. A `/maps/search/?query=...` URL is broad search context, while a Maps homepage has no reliable place context. A documented `query_place_id` paired with a query is shown as a **specific place reference, unverified**; StreetMap does not infer or resolve a business name. Other Maps routes may have no reliable location context. See Google's [Maps URLs documentation](https://developers.google.com/maps/documentation/urls/get-started); its URL formats do not establish the visible website selection as verified.
 
 This prototype does not resolve a place ID to a name, confirm the visible Maps selection, or detect every Maps route. It uses no DOM selectors, internal application state, or private endpoints. Context is refreshed whenever the popup opens and on the Refresh button. If the URL changes while the popup remains open, press Refresh; there is no polling or stored location history.
 
@@ -48,7 +48,7 @@ Use the WXT development browser profile or load the production directory as an u
 
 1. Open a non-Maps page, click StreetMap, and confirm **Google Maps not detected**.
 2. Open a supported Google Maps URL without a recognized place/search/map-center signal; confirm the UI says Maps was detected but context is unavailable.
-3. Open `https://www.google.com/maps/place/Greater+Noida,+Uttar+Pradesh/@28.4983349,77.4334236,12z/`; confirm the broad area and separately labeled map center appear, without a selected-business claim.
+3. Open `https://www.google.com/maps/place/GP+Hotel+%26+Banquet/@26.8178068,80.9071453,15.26z/`; confirm the URL-derived place label and separately labeled map center appear without a verified-venue or exact-coordinate claim.
 4. Open a search URL with `query=coffee+shops`, then a URL with a valid `query_place_id`; confirm search text remains broad context and the ID stays unverified.
 5. Change the Maps URL, reopen the popup or press **Refresh**, and confirm the displayed context updates. Switch tabs and repeat.
 6. Search the demo notes and enter a query with no matches; confirm the existing filtering and empty state still work, and that notes remain labeled as samples unrelated to the map.

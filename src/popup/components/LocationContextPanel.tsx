@@ -7,7 +7,7 @@ interface LocationContextPanelProps {
 
 interface ContextCopy {
   title: string;
-  description: string;
+  description?: string;
   detail?: string;
   secondaryDetail?: string;
 }
@@ -49,20 +49,25 @@ function getContextCopy(context: LocationContext): ContextCopy {
     case 'broad-area':
       return {
         title: 'Broad area/search context available',
-        description:
-          context.source === 'place-path'
-            ? 'This is URL text for an area or place, not a verified business selection.'
-            : 'This is a search query, not a confirmed selected place.',
-        detail: `${context.source === 'place-path' ? 'URL area' : 'Search query'} · ${context.label}`,
+        description: 'This is a search query, not a confirmed selected place.',
+        detail: `Search query · ${context.label}`,
         ...(context.mapCenter
-          ? { secondaryDetail: `Map center · ${context.mapCenter.latitude}, ${context.mapCenter.longitude}` }
+          ? { secondaryDetail: `Map center: ${context.mapCenter.latitude}, ${context.mapCenter.longitude}` }
+          : {}),
+      };
+    case 'place-page-unverified':
+      return {
+        title: 'Place page detected',
+        detail: context.label,
+        ...(context.mapCenter
+          ? { secondaryDetail: `Map center: ${context.mapCenter.latitude}, ${context.mapCenter.longitude}` }
           : {}),
       };
     case 'map-center':
       return {
         title: 'Map-center coordinates available',
         description: 'These coordinates mark the map view center, not a selected business.',
-        detail: `${context.mapCenter.latitude}, ${context.mapCenter.longitude}`,
+        detail: `Map center: ${context.mapCenter.latitude}, ${context.mapCenter.longitude}`,
       };
     case 'unverified-place-reference':
       return {
@@ -126,10 +131,11 @@ export default function LocationContextPanel({ context, onRefresh }: LocationCon
           )}
           <strong>{copy.title}</strong>
         </div>
-        <p>{copy.description}</p>
+        {copy.description && <p>{copy.description}</p>}
         {copy.detail && <code className="context-detail">{copy.detail}</code>}
         {copy.secondaryDetail && <code className="context-detail">{copy.secondaryDetail}</code>}
         {(context.status === 'broad-area' ||
+          context.status === 'place-page-unverified' ||
           context.status === 'map-center' ||
           context.status === 'unverified-place-reference') && (
           <span className="context-source">URL signal · {context.sourceHostname}</span>
