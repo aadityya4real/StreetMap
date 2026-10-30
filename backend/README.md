@@ -88,6 +88,40 @@ Partial indexes support published notes by exact location, author, and category;
 
 `limit` defaults to 20 and must be 1–50. Pagination uses validated context-bound keyset cursors. Requests with invalid or repeated parameters return `400 validation_error`; unknown verified location contexts return a generic `404`; database failures return a safe `500`. Public projections contain no emails, account state, or report details. See [`docs/architecture/api-contract.md`](../docs/architecture/api-contract.md) for the response contract and matching constraints.
 
+## Local development seed data
+
+The optional `cmd/seed` command writes fictional UI/API fixtures to a local development database only. It is never called by the API. The command requires `STREETMAP_ENV=development`, a loopback `DATABASE_URL` for the database named `streetmap`, and the explicit `--confirm-local-seed` flag. It refuses remote hosts, other development database names, production environments, and database schemas older than migration 2. It prints only the validated environment, database name, and host; it does not print the connection URL.
+
+PowerShell, from `backend/` (the command reads the existing local `.env` without echoing its contents):
+
+```powershell
+$env:STREETMAP_ENV = 'development'
+$databaseLine = Get-Content .env | Where-Object { $_ -match '^DATABASE_URL=' } | Select-Object -First 1
+if (-not $databaseLine) { throw 'DATABASE_URL is missing from backend/.env' }
+$env:DATABASE_URL = $databaseLine -replace '^DATABASE_URL=', ''
+go run ./cmd/seed --confirm-local-seed
+```
+
+POSIX shell, from `backend/`:
+
+```sh
+export STREETMAP_ENV=development
+export DATABASE_URL="$(sed -n 's/^DATABASE_URL=//p' .env | head -n 1)"
+go run ./cmd/seed --confirm-local-seed
+```
+
+The seed uses fixed UUIDs, unique `.invalid` demo emails, and insert-only conflict handling. It verifies that any existing row with a seed ID still has the expected demo values and aborts rather than updating a conflicting row. One transaction and a PostgreSQL advisory lock make repeated or overlapping runs safe. All note titles include `[DEMO]`, and note bodies explicitly say they are fictional.
+
+The v1 dataset contains 60 published fictional notes: 51 at a verified demo location so the extension's 50-note page can exercise “Load more,” two sparse exact notes plus a separate nearby note to exercise exact/nearby grouping, nearby verified locations at different distances (including one outside 5 km), an unverified place reference, a broad area, a coordinate-only pin, and sample helpful votes. The coordinates around `0,0` and `1,1` are synthetic test coordinates, not real business locations. The provider IDs use the `streetmap_demo` namespace and do not represent Google Place IDs.
+
+To inspect only the seed rows, use the stable IDs and `[DEMO]` marker in `internal/devseed/seed.go`. To remove them, run the same command with `--remove`:
+
+```powershell
+go run ./cmd/seed --confirm-local-seed --remove
+```
+
+Removal validates the fixed seed IDs and their expected contents before deleting only those IDs. It removes the seed's own votes first. If any non-seed note, vote, or report references a seed user, location, or note, removal stops and rolls back so user-created data and moderation history remain intact. It does not delete Docker volumes, other rows, or reset the database.
+
 ## Tests
 
 Run unit tests without Docker or a database:
