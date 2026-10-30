@@ -11,9 +11,11 @@ import (
 	"os/signal"
 	"syscall"
 
+	"streetmap.in/backend/internal/auth"
 	"streetmap.in/backend/internal/config"
 	"streetmap.in/backend/internal/database"
 	"streetmap.in/backend/internal/httpapi"
+	"streetmap.in/backend/internal/identity"
 	"streetmap.in/backend/internal/notes"
 )
 
@@ -41,9 +43,25 @@ func run() error {
 		}
 	}()
 
+	var authenticator httpapi.Authenticator
+	if cfg.Auth.Enabled {
+		verifier, err := auth.NewVerifier(auth.Config{
+			ProjectURL:   cfg.Auth.SupabaseURL,
+			Issuer:       cfg.Auth.Issuer,
+			Audience:     cfg.Auth.Audience,
+			Algorithm:    cfg.Auth.Algorithm,
+			JWKSCacheFor: cfg.Auth.JWKSCacheFor,
+			ClockSkew:    cfg.Auth.AuthenticationLeeway,
+		})
+		if err != nil {
+			return fmt.Errorf("configure Supabase token validation: %w", err)
+		}
+		authenticator = auth.NewService(verifier, identity.NewPostgresResolver(db))
+	}
+
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.NewHandler(db, notes.NewPostgresReader(db), logger, cfg.ReadinessTimeout),
+		Handler:           httpapi.NewHandler(db, notes.NewPostgresReader(db), logger, cfg.ReadinessTimeout, authenticator),
 		ReadHeaderTimeout: cfg.HTTPReadHeaderTimeout,
 		ReadTimeout:       cfg.HTTPReadTimeout,
 		WriteTimeout:      cfg.HTTPWriteTimeout,
