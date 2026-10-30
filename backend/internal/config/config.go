@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"streetmap.in/backend/internal/auth"
 )
 
 type Config struct {
@@ -24,6 +26,17 @@ type Config struct {
 	HTTPIdleTimeout       time.Duration
 	ReadinessTimeout      time.Duration
 	ShutdownTimeout       time.Duration
+	Auth                  AuthConfig
+}
+
+type AuthConfig struct {
+	Enabled              bool
+	SupabaseURL          string
+	Issuer               string
+	Audience             string
+	Algorithm            string
+	JWKSCacheFor         time.Duration
+	AuthenticationLeeway time.Duration
 }
 
 func Load() (Config, error) {
@@ -79,8 +92,87 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 			return Config{}, err
 		}
 	}
+	if cfg.Auth, err = authConfig(lookup); err != nil {
+		return Config{}, err
+	}
 
 	return cfg, nil
+}
+
+func authConfig(lookup func(string) (string, bool)) (AuthConfig, error) {
+	keys := []string{
+		"SUPABASE_PROJECT_URL", "SUPABASE_ISSUER", "SUPABASE_AUDIENCE", "SUPABASE_JWT_ALGORITHM",
+		"SUPABASE_JWKS_CACHE_DURATION", "AUTH_CLOCK_SKEW",
+	}
+	values := make(map[string]string, len(keys))
+	anySet := false
+	for _, key := range keys {
+		value, exists := lookup(key)
+		if exists && strings.TrimSpace(value) != "" {
+			anySet = true
+		}
+		values[key] = strings.TrimSpace(value)
+	}
+	if !anySet {
+		return AuthConfig{}, nil
+	}
+	for _, key := range keys[:4] {
+		if values[key] == "" {
+			return AuthConfig{}, fmt.Errorf("%s is required when Supabase authentication is configured", key)
+		}
+	}
+	if err := validateSupabaseURLs(values["SUPABASE_PROJECT_URL"], values["SUPABASE_ISSUER"]); err != nil {
+		return AuthConfig{}, err
+	}
+	if strings.ContainsAny(values["SUPABASE_AUDIENCE"], " \t\r\n") {
+		return AuthConfig{}, fmt.Errorf("SUPABASE_AUDIENCE must be one exact audience value")
+	}
+	switch values["SUPABASE_JWT_ALGORITHM"] {
+	case "RS256", "ES256", "EdDSA":
+	default:
+		return AuthConfig{}, fmt.Errorf("SUPABASE_JWT_ALGORITHM must be RS256, ES256, or EdDSA")
+	}
+
+	cacheFor := 5 * time.Minute
+	if values["SUPABASE_JWKS_CACHE_DURATION"] != "" {
+		parsed, err := time.ParseDuration(values["SUPABASE_JWKS_CACHE_DURATION"])
+		if err != nil || parsed <= 0 || parsed > 10*time.Minute {
+			return AuthConfig{}, fmt.Errorf("SUPABASE_JWKS_CACHE_DURATION must be greater than 0 and at most 10m")
+		}
+		cacheFor = parsed
+	}
+	leeway := 30 * time.Second
+	if values["AUTH_CLOCK_SKEW"] != "" {
+		parsed, err := time.ParseDuration(values["AUTH_CLOCK_SKEW"])
+		if err != nil || parsed < 0 || parsed > 2*time.Minute {
+			return AuthConfig{}, fmt.Errorf("AUTH_CLOCK_SKEW must be between 0s and 2m")
+		}
+		leeway = parsed
+	}
+	return AuthConfig{
+		Enabled:              true,
+		SupabaseURL:          values["SUPABASE_PROJECT_URL"],
+		Issuer:               values["SUPABASE_ISSUER"],
+		Audience:             values["SUPABASE_AUDIENCE"],
+		Algorithm:            values["SUPABASE_JWT_ALGORITHM"],
+		JWKSCacheFor:         cacheFor,
+		AuthenticationLeeway: leeway,
+	}, nil
+}
+
+func validateSupabaseURLs(projectURL, issuer string) error {
+	if err := auth.ValidateSupabaseProjectURL(projectURL); err != nil {
+		return fmt.Errorf("SUPABASE_PROJECT_URL must be a canonical hosted Supabase URL: %w", err)
+	}
+	issuerURL, issuerErr := url.Parse(issuer)
+	if issuerErr != nil || issuerURL.Scheme != "https" || issuerURL.Hostname() == "" || issuerURL.User != nil || issuerURL.RawQuery != "" || issuerURL.Fragment != "" || issuerURL.Path == "" {
+		return fmt.Errorf("SUPABASE_ISSUER must be an HTTPS issuer URL")
+	}
+	expectedIssuer := strings.TrimRight(projectURL, "/") + "/auth/v1"
+	if issuer != expectedIssuer {
+		return fmt.Errorf("SUPABASE_ISSUER must match the configured project's Supabase Auth issuer")
+	}
+	return nil
 }
 
 func validateDatabaseURL(raw string) error {

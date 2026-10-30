@@ -1,0 +1,41 @@
+name: StreetMap Authentication Race Verification
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  auth-race-tests:
+    name: Authentication race tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CGO_ENABLED: '1'
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Go 1.27.3
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache-dependency-path: backend/go.sum
+      - name: Verify CGO and GCC
+        shell: bash
+        run: |
+          test "$(go env CGO_ENABLED)" = "1"
+          command -v gcc
+          gcc --version | head -n 1
+      - name: Race-test authentication and configuration
+        run: go test -race -count=1 ./internal/auth ./internal/config
+      - name: Race-test authentication middleware
+        run: go test -race -count=1 ./internal/httpapi

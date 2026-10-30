@@ -1,6 +1,6 @@
 # Notes, location context, and moderation model
 
-**Status:** behavior aligned to the existing persisted model and the public read implementation. Migration `00002` adds a normalized location-label lookup index; no other schema shape changes are made here.
+**Status:** behavior aligned to the existing persisted model and the public read implementation. Migration `00002` adds a normalized location-label lookup index. Migration `00003` adds external identity mapping and makes `users.email` nullable without changing existing records or ownership relationships.
 
 ## Existing persisted model
 
@@ -8,7 +8,8 @@
 
 | Table | Current facts and constraints |
 | --- | --- |
-| `users` | UUID; unique generated normalized email; display name 1–80 chars; status `active`, `suspended`, `deleted`; no credentials or external identity mapping. |
+| `users` | UUID; nullable email with a unique generated normalized-email index for non-null values; display name 1–80 chars; status `active`, `suspended`, `deleted`; no credentials. |
+| `auth_identities` | UUID; required `user_id` FK to `users` with `ON DELETE RESTRICT`; required issuer and subject; unique `(issuer, subject)`; creation timestamp and index by user. Multiple identities may map to one internal StreetMap user. |
 | `locations` | UUID; types `verified_place`, `unverified_place_reference`, `broad_area`, `coordinate_only`; label 1–200; optional PostGIS `geography(Point,4326)`; provider and provider-place ID must be paired and are allowed only for `verified_place`; coordinate-only requires a point, while unverified and broad types cannot carry coordinates. Provider/place ID is unique; coordinate GiST and `(location_type, lower(btrim(display_label)))` lookup indexes exist after migration 00002. |
 | `notes` | UUID; required author and location FKs with `ON DELETE RESTRICT`; title 3–120; body 1–5000; categories `hidden_gem`, `shortcut`, `local_tip`, `parking`, `warning`; status defaults to `published` and allows only `published`, `hidden`, `removed`; created/updated timestamps and update trigger. |
 | `votes` | One `helpful` row per `(note_id,user_id)` via primary key; FKs restrict deletion. |
@@ -60,12 +61,12 @@ Fields and validation should stay aligned with the SQL limits and categories lis
 
 Votes remain one helpful vote per user per note, enforced by the composite PK. Repeated `PUT` is idempotent; removing a vote affects only the caller. Prevent authors voting on their own notes in an atomic transaction. Votes on hidden/removed notes should be rejected or hidden and excluded from public counts per implementation policy.
 
-## Schema gaps to resolve in a later migration
+## Remaining schema and behavior gaps
 
-1. **Authentication:** add `auth_identities(issuer, subject, user_id, ...)`, unique on issuer+subject. Add session/grant records only if the chosen website BFF/provider architecture requires local revocation. Current users has no auth fields; email cannot safely be the identity key.
+1. **Authentication:** migration `00003` adds `auth_identities(issuer, subject, user_id, ...)`, unique on issuer+subject. This table is only a schema foundation: no authentication, user provisioning, identity linking, JWT validation, or session handling is implemented. Add session/grant records only if the website BFF needs local revocation. Email is nullable profile/contact data and is never an identity key.
 2. **Place reference identity:** `locations_verified_provider` requires provider and provider_place_id iff type is verified, so an unverified external place reference cannot currently persist its external provider ID. Add a separate source/reference table or fields with type-appropriate constraints; do not weaken verification semantics accidentally.
 3. **Review lifecycle:** add `pending`/`rejected` (and possibly explicit `deleted_at`) with a safe default before enabling note submission. Existing partial indexes only include published notes. Add moderation events/audit records before moderators act.
-4. **Account removal and retention:** `users.email` is non-null and unique, and notes/votes/reports FKs use `RESTRICT`; physical user deletion conflicts with preserving attribution. Decide whether to deactivate and pseudonymize, retain a tombstone, or anonymize via a schema change while satisfying privacy/retention rules. Revoke identity grants/sessions regardless.
+4. **Account removal and retention:** `users.email` is nullable and remains unique when non-null; notes/votes/reports and auth identity FKs use `RESTRICT`. Physical user deletion conflicts with preserving attribution. Decide whether to deactivate and pseudonymize, retain a tombstone, or anonymize via a schema change while satisfying privacy/retention rules. Revoke identity grants/sessions regardless.
 5. **Edits and public counts:** there is no edit history, moderation actor, vote aggregate, or transactional idempotency ledger. Add only what implementation requirements need; never make user-provided counters authoritative.
 6. **Spatial model:** broad areas currently have only a display label; no polygon or administrative-area identifier exists. Do not fabricate a point/centroid. If polygon search is needed, define its source/licensing and geometry model separately.
 7. **Integrity policy:** add checks/transactions for self-vote, eligible vote/report note status, and any title/body edit review policy. Database constraints should support invariants that must survive concurrent requests.

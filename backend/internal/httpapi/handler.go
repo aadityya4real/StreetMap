@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"streetmap.in/backend/internal/auth"
 	"streetmap.in/backend/internal/notes"
 )
 
@@ -13,11 +14,16 @@ type Pinger interface {
 	PingContext(context.Context) error
 }
 
+type Authenticator interface {
+	Authenticate(context.Context, string) (auth.Principal, error)
+}
+
 type Handler struct {
 	database         Pinger
 	noteReader       notes.Reader
 	logger           *slog.Logger
 	readinessTimeout time.Duration
+	authenticator    Authenticator
 }
 
 type healthData struct {
@@ -29,17 +35,27 @@ type readinessData struct {
 	Dependencies map[string]string `json:"dependencies"`
 }
 
-func NewHandler(database Pinger, noteReader notes.Reader, logger *slog.Logger, readinessTimeout time.Duration) http.Handler {
+func NewHandler(database Pinger, noteReader notes.Reader, logger *slog.Logger, readinessTimeout time.Duration, authenticators ...Authenticator) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	handler := Handler{database: database, noteReader: noteReader, logger: logger, readinessTimeout: readinessTimeout}
+	var authenticator Authenticator
+	if len(authenticators) > 0 {
+		authenticator = authenticators[0]
+	}
+	handler := Handler{database: database, noteReader: noteReader, logger: logger, readinessTimeout: readinessTimeout, authenticator: authenticator}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/health", handler.health)
 	mux.HandleFunc("/api/v1/ready", handler.ready)
 	mux.HandleFunc("/api/v1/notes", handler.listNotes)
 	mux.HandleFunc("/", handler.notFound)
 	return requestLogger(logger, mux)
+}
+
+// Authenticated wraps a future protected handler with the configured bearer-token
+// authentication service. Current public routes deliberately do not use it.
+func (h Handler) Authenticated(next http.Handler) http.Handler {
+	return RequireAuthentication(h.authenticator, h.logger, next)
 }
 
 func (h Handler) health(w http.ResponseWriter, r *http.Request) {
