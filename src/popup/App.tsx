@@ -27,8 +27,11 @@ type NotesState =
       hasMore: boolean;
     };
 
+const SEARCH_COLLAPSE_SCROLL_THRESHOLD_PX = 24;
+
 export default function App() {
   const [query, setQuery] = useState('');
+  const [isSearchExpanded, setIsSearchExpanded] = useState(false);
   const [shareMessage, setShareMessage] = useState('');
   const [locationContext, setLocationContext] = useState<LocationContext>({ status: 'loading' });
   const [notesState, setNotesState] = useState<NotesState>({ status: 'loading' });
@@ -36,7 +39,31 @@ export default function App() {
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [loadMoreError, setLoadMoreError] = useState('');
   const loadMoreController = useRef<AbortController | null>(null);
+  const notesListRef = useRef<HTMLDivElement>(null);
+  const lastNotesScrollTop = useRef(0);
+  const downwardScrollDistance = useRef(0);
   const visibleNotes = useNoteSearch(notesState.status === 'ready' ? notesState.notes : [], query);
+
+  useEffect(() => {
+    lastNotesScrollTop.current = notesListRef.current?.scrollTop ?? 0;
+    downwardScrollDistance.current = 0;
+  }, [isSearchExpanded]);
+
+  const handleNotesListScroll = useCallback((scrollTop: number) => {
+    const scrollDelta = scrollTop - lastNotesScrollTop.current;
+    lastNotesScrollTop.current = scrollTop;
+
+    if (!isSearchExpanded || scrollDelta <= 0) {
+      downwardScrollDistance.current = 0;
+      return;
+    }
+
+    downwardScrollDistance.current += scrollDelta;
+    if (downwardScrollDistance.current >= SEARCH_COLLAPSE_SCROLL_THRESHOLD_PX) {
+      downwardScrollDistance.current = 0;
+      setIsSearchExpanded(false);
+    }
+  }, [isSearchExpanded]);
 
   const refreshLocationContext = useCallback(() => {
     setLocationContext({ status: 'loading' });
@@ -136,12 +163,29 @@ export default function App() {
           <span className="api-badge"><span aria-hidden="true" /> PUBLIC NOTES</span>
         </div>
         <p className="notes-context-caption">Results follow the Maps context shown above.</p>
-        <SearchInput value={query} onChange={setQuery} />
+        <div className="search-collapse" hidden={!isSearchExpanded}>
+          <SearchInput id="note-search" value={query} onChange={setQuery} />
+        </div>
 
         <section className="notes-section" aria-label="Community notes">
           <div className="list-heading">
             <h2>Local finds</h2>
-            <span>{notesState.status === 'ready' ? `${visibleNotes.length} NOTES` : ' '}</span>
+            <div className="list-heading-actions">
+              <button
+                className="search-toggle"
+                type="button"
+                aria-label={isSearchExpanded ? 'Hide note search' : 'Show note search'}
+                aria-expanded={isSearchExpanded}
+                aria-controls="note-search"
+                onClick={() => setIsSearchExpanded((expanded) => !expanded)}
+              >
+                <svg aria-hidden="true" viewBox="0 0 20 20" fill="none">
+                  <circle cx="8.8" cy="8.8" r="5.8" stroke="currentColor" strokeWidth="1.6" />
+                  <path d="m13.2 13.2 4 4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                </svg>
+              </button>
+              <span>{notesState.status === 'ready' ? `${visibleNotes.length} NOTES` : ' '}</span>
+            </div>
           </div>
           <NotesList
             notes={visibleNotes}
@@ -149,6 +193,8 @@ export default function App() {
             status={notesState.status}
             message={notesState.status === 'error' ? notesState.message : noteEmptyMessage}
             onRetry={retryNotes}
+            listRef={notesListRef}
+            onListScroll={handleNotesListScroll}
           />
           {notesState.status === 'ready' && notesState.hasMore && (
             <div className="load-more-wrap">

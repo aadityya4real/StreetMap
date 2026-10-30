@@ -6,6 +6,7 @@ import { createRoot } from 'react-dom/client';
 
 import NoteCard from '../src/popup/components/NoteCard.tsx';
 import NotesList from '../src/popup/components/NotesList.tsx';
+import SearchInput from '../src/popup/components/SearchInput.tsx';
 
 const window = new Window();
 globalThis.window = window;
@@ -109,6 +110,46 @@ test('empty state can explain when no supported context is available', () => {
   try {
     assert.match(mounted.container.textContent, /No local notes yet/);
     assert.match(mounted.container.textContent, /Open a supported Google Maps page/);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test('expanded search input is labelled, controlled, and uses the native clearable search type', () => {
+  const mounted = mount(React.createElement(SearchInput, {
+    id: 'note-search',
+    value: 'tea',
+    onChange: () => {},
+  }));
+  try {
+    const input = mounted.container.querySelector('#note-search');
+    assert.ok(input);
+    assert.equal(input.getAttribute('type'), 'search');
+    assert.equal(input.value, 'tea');
+    assert.equal(mounted.container.querySelector('label').htmlFor, 'note-search');
+    assert.equal(mounted.container.querySelectorAll('.search-field svg').length, 1);
+    assert.equal(mounted.container.querySelector('kbd'), null);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test('only the notes list reports its own scroll position', () => {
+  const scrollPositions = [];
+  const mounted = mount(React.createElement(NotesList, {
+    notes: [displayNote],
+    query: '',
+    onListScroll: (scrollTop) => scrollPositions.push(scrollTop),
+  }));
+  try {
+    const list = mounted.container.querySelector('.notes-list');
+    assert.ok(list);
+    list.scrollTop = 28;
+    act(() => list.dispatchEvent(new window.Event('scroll', { bubbles: true })));
+    assert.deepEqual(scrollPositions, [28]);
+
+    act(() => mounted.container.dispatchEvent(new window.Event('scroll', { bubbles: true })));
+    assert.deepEqual(scrollPositions, [28]);
   } finally {
     mounted.unmount();
   }
