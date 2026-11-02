@@ -21,9 +21,11 @@ docker compose --env-file .env up -d
 
 The Compose service uses `postgis/postgis:17-3.6`, maps PostgreSQL to `127.0.0.1:54329` by default, and persists data in a named Docker volume. The image provides PostGIS 3.6 for PostgreSQL 17. [PostGIS image versions](https://github.com/postgis/docker-postgis).
 
-`.env.example` contains only local-development placeholders. Replace its local password before use. Compose reads `.env` for the database container; Go does not load dotenv files, so export `DATABASE_URL` in the shell where you run Go.
+`.env.example` contains only local-development placeholders. Replace its local password before use. Compose reads `.env` for the database container. When `STREETMAP_ENV` is unset or set to `development`, the API also reads `.env` from the backend working directory as a local convenience. Values already present in the process environment take precedence. A missing `.env` is allowed; required configuration validation still applies.
 
-PowerShell:
+For production, set `STREETMAP_ENV=production` and provide configuration through the process environment or deployment secret manager. The API does not load `.env` in production or other non-development modes.
+
+PowerShell (optional when using the local `.env`):
 
 ```powershell
 $env:DATABASE_URL = 'postgres://streetmap:replace-with-a-local-only-password@127.0.0.1:54329/streetmap?sslmode=disable'
@@ -141,7 +143,7 @@ Run unit tests without Docker or a database:
 go test ./...
 ```
 
-Migration, identity-resolution, and public-notes integration tests skip unless `STREETMAP_TEST_DATABASE_URL` is set. They only accept a loopback database name ending in `_test`; identity and migration checks use isolated temporary schemas and never reset the database. Note fixtures are written in a transaction that is rolled back. For the Compose database, create a dedicated test database first:
+Migration, identity-resolution, and public-notes integration tests skip unless `STREETMAP_TEST_DATABASE_URL` is set. They require a loopback database URL with a database name ending in `_test`; the public-notes suite requires the exact name `streetmap_test`. Identity and migration checks use isolated temporary schemas and never reset the database. Public-note fixtures are written in a transaction that is rolled back. For the Compose database, create a dedicated test database first:
 
 ```sh
 docker compose exec db createdb -U streetmap streetmap_test

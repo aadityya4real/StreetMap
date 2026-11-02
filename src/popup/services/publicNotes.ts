@@ -29,17 +29,25 @@ export class NotesRequestError extends Error {
 }
 
 export type NotesRequestContext =
-  | { type: 'broad_area'; label: string }
-  | { type: 'place_page_unverified'; label: string }
+  | { type: 'broad_area'; label: string; mapCenter?: { latitude: number; longitude: number } }
+  | { type: 'place_page_unverified'; label: string; mapCenter?: { latitude: number; longitude: number } }
   | { type: 'map_center'; latitude: number; longitude: number };
 
 /** Use only context selectors the current Maps URL reader can establish safely. */
 export function getNotesRequestContext(context: LocationContext): NotesRequestContext | null {
   switch (context.status) {
     case 'broad-area':
-      return { type: 'broad_area', label: context.label };
+      return {
+        type: 'broad_area',
+        label: context.label,
+        ...(context.mapCenter ? { mapCenter: context.mapCenter } : {}),
+      };
     case 'place-page-unverified':
-      return { type: 'place_page_unverified', label: context.label };
+      return {
+        type: 'place_page_unverified',
+        label: context.label,
+        ...(context.mapCenter ? { mapCenter: context.mapCenter } : {}),
+      };
     case 'map-center':
       return {
         type: 'map_center',
@@ -71,6 +79,11 @@ export function buildNotesUrl(
   if (context.type === 'broad_area' || context.type === 'place_page_unverified') {
     url.searchParams.set('context_type', context.type);
     url.searchParams.set('label', context.label);
+    if (context.mapCenter) {
+      url.searchParams.set('latitude', String(context.mapCenter.latitude));
+      url.searchParams.set('longitude', String(context.mapCenter.longitude));
+      url.searchParams.set('radius_m', String(MAX_NOTE_DISTANCE_M));
+    }
   } else {
     url.searchParams.set('context_type', context.type);
     url.searchParams.set('latitude', String(context.latitude));
@@ -179,6 +192,18 @@ function parseResponseContext(
   if (value.type !== expected.type) throw new InvalidNotesResponseError();
   if (expected.type === 'broad_area' || expected.type === 'place_page_unverified') {
     if (value.label !== expected.label) throw new InvalidNotesResponseError();
+    if (expected.mapCenter) {
+      if (value.latitude !== expected.mapCenter.latitude || value.longitude !== expected.mapCenter.longitude) {
+        throw new InvalidNotesResponseError();
+      }
+      return {
+        type: expected.type,
+        label: expected.label,
+        latitude: expected.mapCenter.latitude,
+        longitude: expected.mapCenter.longitude,
+      };
+    }
+    if (value.latitude !== undefined || value.longitude !== undefined) throw new InvalidNotesResponseError();
     return { type: expected.type, label: expected.label };
   }
   if (value.latitude !== expected.latitude || value.longitude !== expected.longitude) {
@@ -226,8 +251,8 @@ function parseNote(value: unknown, group: NoteGroup, expectedContext: NotesReque
     throw new InvalidNotesResponseError();
   }
 
-  // The extension currently issues only broad, unverified-label, and map-center
-  // queries. None of those selectors can produce exact results by contract.
+  // The extension issues broad, unverified-label, and map-center queries.
+  // None of those selectors can produce exact results by contract.
   if (group === 'exact') {
     throw new InvalidNotesResponseError();
   }
@@ -238,7 +263,9 @@ function parseNote(value: unknown, group: NoteGroup, expectedContext: NotesReque
   ) {
     throw new InvalidNotesResponseError();
   }
-  if (group === 'nearby' && (expectedContext.type !== 'map_center' || matchType !== 'nearby')) {
+  const allowsNearby = expectedContext.type === 'map_center' ||
+    ((expectedContext.type === 'broad_area' || expectedContext.type === 'place_page_unverified') && Boolean(expectedContext.mapCenter));
+  if (group === 'nearby' && (!allowsNearby || matchType !== 'nearby')) {
     throw new InvalidNotesResponseError();
   }
   if (group === 'nearby') {

@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -108,6 +110,75 @@ func TestLoadRejectsMissingOrInvalidRequiredConfiguration(t *testing.T) {
 				t.Fatalf("load error = %v, want containing %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestMissingLocalEnvironmentFileLeavesRequiredConfigurationValidationIntact(t *testing.T) {
+	environment := map[string]string{}
+	lookup := func(key string) (string, bool) {
+		value, ok := environment[key]
+		return value, ok
+	}
+	setenv := func(key, value string) error {
+		environment[key] = value
+		return nil
+	}
+	missingPath := filepath.Join(t.TempDir(), ".env")
+	if err := loadLocalEnvironmentFile(missingPath, "development", lookup, setenv); err != nil {
+		t.Fatalf("missing local .env should be optional: %v", err)
+	}
+	if _, err := load(lookup); err == nil || !strings.Contains(err.Error(), "DATABASE_URL is required") {
+		t.Fatalf("missing required configuration error = %v, want DATABASE_URL is required", err)
+	}
+}
+
+func TestLocalEnvironmentFileDoesNotOverrideExistingEnvironment(t *testing.T) {
+	environment := map[string]string{
+		"DATABASE_URL": "postgres://shell-value@localhost:5432/streetmap?sslmode=disable",
+	}
+	lookup := func(key string) (string, bool) {
+		value, ok := environment[key]
+		return value, ok
+	}
+	setenv := func(key, value string) error {
+		environment[key] = value
+		return nil
+	}
+	path := filepath.Join(t.TempDir(), ".env")
+	contents := "DATABASE_URL=postgres://file-value@localhost:5432/streetmap?sslmode=disable\nHTTP_ADDR=127.0.0.1:9090\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := loadLocalEnvironmentFile(path, "development", lookup, setenv); err != nil {
+		t.Fatalf("load local environment file: %v", err)
+	}
+	if environment["DATABASE_URL"] != "postgres://shell-value@localhost:5432/streetmap?sslmode=disable" {
+		t.Fatal("local .env replaced DATABASE_URL already present in the environment")
+	}
+	if environment["HTTP_ADDR"] != "127.0.0.1:9090" {
+		t.Fatal("local .env did not supply an unset configuration value")
+	}
+}
+
+func TestProductionDoesNotLoadLocalEnvironmentFile(t *testing.T) {
+	environment := map[string]string{}
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(path, []byte("DATABASE_URL=local-only\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lookup := func(key string) (string, bool) {
+		value, ok := environment[key]
+		return value, ok
+	}
+	setenv := func(key, value string) error {
+		environment[key] = value
+		return nil
+	}
+	if err := loadLocalEnvironmentFile(path, "production", lookup, setenv); err != nil {
+		t.Fatalf("production should not load .env: %v", err)
+	}
+	if len(environment) != 0 {
+		t.Fatal("production loaded values from the local .env file")
 	}
 }
 

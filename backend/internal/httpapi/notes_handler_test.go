@@ -31,6 +31,8 @@ func TestListNotesParsesSupportedContexts(t *testing.T) {
 		{"verified location", "location_id=7c48a51e-3d31-4a34-b503-88747a555a74", notes.ContextVerifiedPlace, "", 0},
 		{"broad area", "context_type=broad_area&label=Greater+Noida%2C+Uttar+Pradesh", notes.ContextBroadArea, "Greater Noida, Uttar Pradesh", 0},
 		{"unverified place label", "context_type=place_page_unverified&label=GP+Hotel+%26+Banquet", notes.ContextUnverifiedPlace, "GP Hotel & Banquet", 0},
+		{"broad area with map center at maximum radius", "context_type=broad_area&label=Greater+Noida&latitude=28.5&longitude=77.2&radius_m=5000", notes.ContextBroadArea, "Greater Noida", 5000},
+		{"place page with map center and default radius", "context_type=place_page_unverified&label=GP+Hotel&latitude=26.8&longitude=80.9", notes.ContextUnverifiedPlace, "GP Hotel", 5000},
 		{"map center", "context_type=map_center&label=GP+Hotel&latitude=26.8178068&longitude=80.9071453", notes.ContextMapCenter, "GP Hotel", 5000},
 		{"user selected coordinate", "context_type=coordinate&latitude=28.6&longitude=77.2", notes.ContextCoordinate, "", 0},
 	}
@@ -73,7 +75,12 @@ func TestListNotesRejectsInvalidContextsAndBounds(t *testing.T) {
 		{"repeated value", "context_type=broad_area&label=Town&label=Other", "label"},
 		{"unknown parameter", "context_type=broad_area&label=Town&author_user_id=1", "author_user_id"},
 		{"malformed escaping", "context_type=broad_area&label=%ZZ", "query"},
-		{"incompatible nearby radius", "context_type=broad_area&label=Town&radius_m=10", "context_type"},
+		{"radius requires map center coordinates", "context_type=broad_area&label=Town&radius_m=10", "radius_m"},
+		{"combined label missing longitude", "context_type=broad_area&label=Town&latitude=28", "longitude"},
+		{"combined label missing latitude", "context_type=place_page_unverified&label=Venue&longitude=77", "latitude"},
+		{"combined label invalid latitude", "context_type=broad_area&label=Town&latitude=91&longitude=77", "latitude"},
+		{"combined label radius over limit", "context_type=place_page_unverified&label=Venue&latitude=28&longitude=77&radius_m=5001", "radius_m"},
+		{"combined label invalid radius", "context_type=broad_area&label=Town&latitude=28&longitude=77&radius_m=0", "radius_m"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -117,6 +124,33 @@ func TestListNotesReturnsOnlyPublicFieldsAndLabelsMatches(t *testing.T) {
 	}
 	if len(decoded.Data.Exact) != 1 || len(decoded.Data.Nearby) != 1 || decoded.Data.Nearby[0].Match.DistanceM == nil || *decoded.Data.Nearby[0].Match.DistanceM != 640 {
 		t.Fatalf("unexpected response groups or rounded nearby distance: %+v", decoded.Data)
+	}
+}
+
+func TestCombinedContextResponseReturnsLabelAndMapCenterSeparately(t *testing.T) {
+	handler := notesHandler(notesReaderFunc(func(context.Context, notes.Query) (notes.Page, error) {
+		return emptyNotesPage(), nil
+	}))
+	response := request(handler, http.MethodGet, "/api/v1/notes?context_type=place_page_unverified&label=GP+Hotel&latitude=26.8178068&longitude=80.9071453&radius_m=5000")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Data struct {
+			Context struct {
+				Type      string   `json:"type"`
+				Label     string   `json:"label"`
+				Latitude  *float64 `json:"latitude"`
+				Longitude *float64 `json:"longitude"`
+			} `json:"context"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	context := payload.Data.Context
+	if context.Type != notes.ContextUnverifiedPlace || context.Label != "GP Hotel" || context.Latitude == nil || context.Longitude == nil || *context.Latitude != 26.8178068 || *context.Longitude != 80.9071453 {
+		t.Fatalf("response did not preserve separate URL label and map-center coordinates: %+v", context)
 	}
 }
 
@@ -171,6 +205,51 @@ func TestListNotesValidatesAndBindsCursorsToContext(t *testing.T) {
 			t.Fatalf("unexpected cross-context cursor response: %d %s", response.Code, response.Body.String())
 		}
 	})
+}
+
+func TestCombinedContextCursorBindsLabelCoordinatesAndRadius(t *testing.T) {
+	base := "context_type=place_page_unverified&label=GP+Hotel&latitude=26.8&longitude=80.9&radius_m=5000"
+	parsed, validationErr := parseNotesQuery(base)
+	if validationErr != nil {
+		t.Fatal(validationErr)
+	}
+	key, err := notes.ContextKey(parsed.Context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor, err := notes.EncodeCursor(notes.Cursor{
+		ContextKey: key, Phase: notes.PhaseNearby,
+		CreatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+		DistanceM: 650, NoteID: "00000000-0000-0000-0000-000000000001",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	matchingHandler := notesHandler(notesReaderFunc(func(_ context.Context, query notes.Query) (notes.Page, error) {
+		if query.Cursor == nil || query.Cursor.Phase != notes.PhaseNearby {
+			t.Fatal("matching combined context cursor was not preserved")
+		}
+		return emptyNotesPage(), nil
+	}))
+	matchingResponse := request(matchingHandler, http.MethodGet, "/api/v1/notes?"+base+"&cursor="+url.QueryEscape(cursor))
+	if matchingResponse.Code != http.StatusOK {
+		t.Fatalf("matching combined context cursor rejected: %d %s", matchingResponse.Code, matchingResponse.Body.String())
+	}
+	for _, variant := range []string{
+		"context_type=place_page_unverified&label=Other&latitude=26.8&longitude=80.9&radius_m=5000",
+		"context_type=place_page_unverified&label=GP+Hotel&latitude=26.81&longitude=80.9&radius_m=5000",
+		"context_type=place_page_unverified&label=GP+Hotel&latitude=26.8&longitude=80.91&radius_m=5000",
+		"context_type=place_page_unverified&label=GP+Hotel&latitude=26.8&longitude=80.9&radius_m=4999",
+	} {
+		handler := notesHandler(notesReaderFunc(func(context.Context, notes.Query) (notes.Page, error) {
+			t.Fatal("reader must not receive a cursor from a different combined context")
+			return notes.Page{}, nil
+		}))
+		response := request(handler, http.MethodGet, "/api/v1/notes?"+variant+"&cursor="+url.QueryEscape(cursor))
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"cursor"`) {
+			t.Fatalf("expected context-bound cursor rejection, got %d %s", response.Code, response.Body.String())
+		}
+	}
 }
 
 func TestListNotesDoesNotExposeStorageErrors(t *testing.T) {

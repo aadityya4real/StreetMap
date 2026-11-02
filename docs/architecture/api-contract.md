@@ -31,7 +31,7 @@
 
 ## Discover notes
 
-`GET /api/v1/notes` accepts exactly one context selector. The server validates all inputs and applies the 5 km ceiling itself; client-provided limits are never authoritative. Results are split into `exact`, `context_matches`, and `nearby` arrays so label-based results cannot be mistaken for verified exact-place results. The `context_matches` array contains same-type label matches for broad and unverified label requests; labels are trimmed and compared case-insensitively for exact equality, never fuzzy-matched.
+`GET /api/v1/notes` accepts exactly one context selector. A broad or unverified label selector may include both latitude and longitude to add a separate map-center nearby phase. The server validates all inputs and applies the 5 km ceiling itself; client-provided limits are never authoritative. Results are split into `exact`, `context_matches`, and `nearby` arrays so label-based results cannot be mistaken for verified exact-place results. The `context_matches` array contains same-type label matches for broad and unverified label requests; labels are trimmed and compared case-insensitively for exact equality, never fuzzy-matched.
 
 ### Known StreetMap location
 
@@ -51,11 +51,17 @@ Only `broad_area` notes may be returned in `context_matches` for a broad-area re
 
 This label is an unverified URL reference, not verified identity. The API may return only persisted `unverified_place_reference` notes with the same normalized label in `context_matches`. It never joins to a verified venue or computes proximity from the label. Exact label equality does not distinguish two different venues that happen to share a label; the response match type remains `unverified_reference_label`, not `exact_location`. Current schema cannot store provider/provider-place ID on this type because of `locations_verified_provider`; a stable reference identity requires a future schema decision.
 
+When the Maps URL also provides a valid viewport center, the extension may request both signals while retaining the place-page label selector:
+
+`GET /api/v1/notes?context_type=place_page_unverified&label=GP%20Hotel%20%26%20Banquet&latitude=26.8178068&longitude=80.9071453&radius_m=5000`
+
+The API returns matching unverified-label notes in `context_matches` and map-center discoveries in `nearby`. The center is never treated as the venue's coordinates, and nearby notes are not attributed to the venue. Broad-area requests use the same optional coordinate/radius parameters. Latitude and longitude must be supplied together; `radius_m` requires both and defaults to 5000 when omitted. The radius remains restricted to 1–5000 metres.
+
 ### Map-center anchor
 
 `GET /api/v1/notes?context_type=map_center&latitude=26.8178068&longitude=80.9071453&radius_m=5000`
 
-The extension’s `@lat,lng` URL segment denotes the viewport center. Such coordinates are only a nearby-search anchor. They are never the selected venue coordinates and never yield exact results. Validate finite latitude in `[-90,90]`, longitude in `[-180,180]`; reject malformed or out-of-range values. `radius_m` defaults to 5000 and is accepted only in the range 1–5000. The current request selects `map_center` alone; it does not combine a URL label with a nearby anchor for broad or unverified-label matching.
+The extension’s `@lat,lng` URL segment denotes the viewport center. Such coordinates are only a nearby-search anchor. They are never the selected venue coordinates and never yield exact results. Validate finite latitude in `[-90,90]`, longitude in `[-180,180]`; reject malformed or out-of-range values. `radius_m` defaults to 5000 and is accepted only in the range 1–5000. The anchor may be sent alone as `map_center`, or paired with a broad/unverified label selector; the paired form returns label matches and nearby results in their separate groups.
 
 ### Coordinate-only selection
 
@@ -65,7 +71,7 @@ Reserve this for a user-confirmed coordinate selection explicitly captured by a 
 
 ### Sparse exact results and response
 
-For `location_id` only, return exact published notes first. If fewer than 3 are available, append up to 20 nearby published notes within 5,000 m when the verified location has a usable point. Three and twenty are conservative provisional implementation defaults, kept server-side constants rather than client policy. `map_center` requests return nearby results only; broad and unverified-label requests do not acquire nearby results. The query uses PostGIS geography distance (`ST_DWithin`/`ST_Distance`) and includes the originating location. Exact/context results order newest first with note UUID descending as a tie-breaker; nearby results order by distance ascending, then newest and note UUID descending. Each response page contains at most `limit` total notes across its result arrays.
+For `location_id` only, return exact published notes first. If fewer than 3 are available, append up to 20 nearby published notes within 5,000 m when the verified location has a usable point. Three and twenty are conservative provisional implementation defaults, kept server-side constants rather than client policy. `map_center` requests return nearby results only. Paired broad/unverified-label requests paginate through label matches first, then nearby results; they never promote the label or map center to an exact match. The cursor is bound to the selector, normalized label, coordinates, and radius. A note that qualifies for both groups is retained in `context_matches` and excluded from `nearby`. The query uses PostGIS geography distance (`ST_DWithin`/`ST_Distance`) and includes the originating location. Exact/context results order newest first with note UUID descending as a tie-breaker; nearby results order by distance ascending, then newest and note UUID descending. Each response page contains at most `limit` total notes across its result arrays.
 
 Example:
 

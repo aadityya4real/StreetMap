@@ -38,8 +38,14 @@ func (reader *PostgresReader) ListPublicNotes(ctx context.Context, query Query) 
 	case ContextVerifiedPlace:
 		return reader.listVerifiedPlace(ctx, query)
 	case ContextBroadArea:
+		if query.Context.RadiusM > 0 {
+			return reader.listLabeledContextWithNearby(ctx, query, "broad_area", MatchBroadArea)
+		}
 		return reader.listLabeledContext(ctx, query, "broad_area", MatchBroadArea)
 	case ContextUnverifiedPlace:
+		if query.Context.RadiusM > 0 {
+			return reader.listLabeledContextWithNearby(ctx, query, "unverified_place_reference", MatchUnverifiedReference)
+		}
 		return reader.listLabeledContext(ctx, query, "unverified_place_reference", MatchUnverifiedReference)
 	case ContextCoordinate:
 		return reader.listCoordinate(ctx, query)
@@ -115,7 +121,7 @@ func (reader *PostgresReader) listVerifiedPlace(ctx context.Context, query Query
 	if nearLimit == 0 {
 		return page, nil
 	}
-	nearbyRows, err := reader.readNearby(ctx, query, query.Context.LocationID, nearLimit+1, cursor, latitude, longitude)
+	nearbyRows, err := reader.readNearby(ctx, query, query.Context.LocationID, nearLimit+1, cursor, latitude, longitude, "", "")
 	if err != nil {
 		return Page{}, err
 	}
@@ -168,6 +174,64 @@ func (reader *PostgresReader) listLabeledContext(ctx context.Context, query Quer
 	return page, nil
 }
 
+// listLabeledContextWithNearby returns label matches first, then map-center
+// discoveries. The map center remains a separate nearby context and is never
+// treated as the labeled place's coordinates.
+func (reader *PostgresReader) listLabeledContextWithNearby(ctx context.Context, query Query, locationType, matchType string) (Page, error) {
+	page := Page{Exact: []Note{}, ContextMatches: []Note{}, Nearby: []Note{}}
+	if query.Cursor == nil || query.Cursor.Phase == PhaseContext {
+		afterCreatedAt, afterID := keysetValues(query.Cursor)
+		rows, err := reader.readSimpleNotes(ctx, labeledContextSQL, locationType, query.Context.Label, query.Limit+1, afterCreatedAt, afterID)
+		if err != nil {
+			return Page{}, err
+		}
+		if len(rows) > query.Limit {
+			rows = rows[:query.Limit]
+			for i := range rows {
+				rows[i].MatchType = matchType
+			}
+			page.ContextMatches = rows
+			page.HasMore = true
+			page.NextCursor = newCursor(query, PhaseContext, &rows[len(rows)-1], 0)
+			return page, nil
+		}
+		for i := range rows {
+			rows[i].MatchType = matchType
+		}
+		page.ContextMatches = rows
+	}
+
+	remaining := query.Limit - len(page.ContextMatches)
+	if remaining == 0 {
+		// The context group exactly filled this page. Probe nearby results so the
+		// next cursor can move to that phase without skipping its first result.
+		rows, err := reader.readNearby(ctx, query, "", 1, nil, sql.NullFloat64{}, sql.NullFloat64{}, locationType, query.Context.Label)
+		if err != nil {
+			return Page{}, err
+		}
+		if len(rows) > 0 {
+			page.HasMore = true
+			page.NextCursor = newStartCursor(query, PhaseNearby, 0)
+		}
+		return page, nil
+	}
+
+	rows, err := reader.readNearby(ctx, query, "", remaining+1, query.Cursor, sql.NullFloat64{}, sql.NullFloat64{}, locationType, query.Context.Label)
+	if err != nil {
+		return Page{}, err
+	}
+	if len(rows) > remaining {
+		rows = rows[:remaining]
+		page.HasMore = true
+		page.NextCursor = newNearbyCursor(query, rows[len(rows)-1], 0)
+	}
+	for i := range rows {
+		rows[i].MatchType = MatchNearby
+	}
+	page.Nearby = rows
+	return page, nil
+}
+
 func (reader *PostgresReader) listCoordinate(ctx context.Context, query Query) (Page, error) {
 	page := Page{Exact: []Note{}, ContextMatches: []Note{}, Nearby: []Note{}}
 	afterCreatedAt, afterID := keysetValues(query.Cursor)
@@ -189,7 +253,7 @@ func (reader *PostgresReader) listCoordinate(ctx context.Context, query Query) (
 
 func (reader *PostgresReader) listMapCenter(ctx context.Context, query Query) (Page, error) {
 	page := Page{Exact: []Note{}, ContextMatches: []Note{}, Nearby: []Note{}}
-	rows, err := reader.readNearby(ctx, query, "", query.Limit+1, query.Cursor, sql.NullFloat64{}, sql.NullFloat64{})
+	rows, err := reader.readNearby(ctx, query, "", query.Limit+1, query.Cursor, sql.NullFloat64{}, sql.NullFloat64{}, "", "")
 	if err != nil {
 		return Page{}, err
 	}
@@ -214,7 +278,7 @@ func (reader *PostgresReader) readSimpleNotes(ctx context.Context, statement str
 	return scanNotes(rows)
 }
 
-func (reader *PostgresReader) readNearby(ctx context.Context, query Query, excludeLocationID string, limit int, cursor *Cursor, locationLatitude, locationLongitude sql.NullFloat64) ([]Note, error) {
+func (reader *PostgresReader) readNearby(ctx context.Context, query Query, excludeLocationID string, limit int, cursor *Cursor, locationLatitude, locationLongitude sql.NullFloat64, excludeLabelType, excludeLabel string) ([]Note, error) {
 	var afterDistance, afterCreatedAt, afterID any
 	if cursor != nil && cursor.Phase == PhaseNearby && cursor.NoteID != "" {
 		afterDistance = cursor.DistanceM
@@ -241,13 +305,20 @@ func (reader *PostgresReader) readNearby(ctx context.Context, query Query, exclu
 	}
 	rows, err := reader.db.QueryContext(ctx, nearbySQL,
 		originLocation, latitude, longitude, radius, excludedLocation,
-		afterDistance, afterCreatedAt, afterID, limit,
+		afterDistance, afterCreatedAt, afterID, limit, nullableString(excludeLabelType), nullableString(excludeLabel),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("query nearby public notes: %w", err)
 	}
 	defer rows.Close()
 	return scanNotes(rows)
+}
+
+func nullableString(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }
 
 func scanNotes(rows *sql.Rows) ([]Note, error) {
@@ -363,6 +434,12 @@ const nearbySQL = `
 			AND l.coordinates IS NOT NULL
 			AND l.location_type IN ('verified_place', 'coordinate_only')
 			AND ($5::uuid IS NULL OR n.location_id <> $5::uuid)
+			AND ($10::text IS NULL OR NOT EXISTS (
+				SELECT 1 FROM locations context_location
+				WHERE context_location.id = n.location_id
+					AND context_location.location_type = $10::text
+					AND lower(btrim(context_location.display_label)) = lower(btrim($11::text))
+			))
 			AND ST_DWithin(l.coordinates, origin.point, $4::double precision)
 	)
 	SELECT id, title, body, category, author_display_name, created_at, vote_count, location_label, distance_m

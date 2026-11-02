@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"strings"
@@ -109,6 +110,157 @@ func TestPublicNotesContextsAndNearbyPolicy(t *testing.T) {
 		}
 	})
 
+	t.Run("broad label and map center return separate groups", func(t *testing.T) {
+		page, err := reader.ListPublicNotes(ctx, notes.Query{Context: notes.Context{
+			Type: notes.ContextBroadArea, Label: "Downtown", Latitude: 28, Longitude: 77, RadiusM: 5000,
+		}, Limit: 20})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.ContextMatches) != 1 || page.ContextMatches[0].ID == "" || page.ContextMatches[0].MatchType != notes.MatchBroadArea {
+			t.Fatalf("unexpected label context group: %+v", page.ContextMatches)
+		}
+		if len(page.Nearby) == 0 {
+			t.Fatalf("expected map-center discoveries: %+v", page)
+		}
+		seen := map[string]bool{page.ContextMatches[0].ID: true}
+		for _, note := range page.Nearby {
+			if note.MatchType != notes.MatchNearby || note.DistanceM == nil || seen[note.ID] {
+				t.Fatalf("nearby note was mislabeled or duplicated across groups: %+v", note)
+			}
+			seen[note.ID] = true
+		}
+	})
+
+	t.Run("label matches remain when map center has no nearby notes", func(t *testing.T) {
+		page, err := reader.ListPublicNotes(ctx, notes.Query{Context: notes.Context{
+			Type: notes.ContextBroadArea, Label: "Downtown", Latitude: 0, Longitude: 0, RadiusM: 5000,
+		}, Limit: 20})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.ContextMatches) != 1 || len(page.Nearby) != 0 {
+			t.Fatalf("unexpected context-only results: %+v", page)
+		}
+	})
+
+	t.Run("nearby notes remain when label has no matches", func(t *testing.T) {
+		page, err := reader.ListPublicNotes(ctx, notes.Query{Context: notes.Context{
+			Type: notes.ContextUnverifiedPlace, Label: "No label match", Latitude: 28, Longitude: 77, RadiusM: 5000,
+		}, Limit: 20})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.ContextMatches) != 0 || len(page.Nearby) == 0 {
+			t.Fatalf("unexpected nearby-only results: %+v", page)
+		}
+	})
+
+	t.Run("place-page label remains separate from map-center results", func(t *testing.T) {
+		page, err := reader.ListPublicNotes(ctx, notes.Query{Context: notes.Context{
+			Type: notes.ContextUnverifiedPlace, Label: "Cafe Example", Latitude: 28, Longitude: 77, RadiusM: 5000,
+		}, Limit: 20})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.ContextMatches) != 1 || page.ContextMatches[0].ID == "" || page.ContextMatches[0].MatchType != notes.MatchUnverifiedReference {
+			t.Fatalf("unexpected unverified place group: %+v", page.ContextMatches)
+		}
+		if len(page.Nearby) == 0 || page.Nearby[0].MatchType != notes.MatchNearby {
+			t.Fatalf("expected separate nearby results: %+v", page.Nearby)
+		}
+	})
+
+	t.Run("pagination continues from label phase into nearby phase", func(t *testing.T) {
+		query := notes.Query{Context: notes.Context{
+			Type: notes.ContextBroadArea, Label: "Downtown", Latitude: 28, Longitude: 77, RadiusM: 5000,
+		}, Limit: 1}
+		first, err := reader.ListPublicNotes(ctx, query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(first.ContextMatches) != 1 || len(first.Nearby) != 0 || !first.HasMore || first.NextCursor == nil || first.NextCursor.Phase != notes.PhaseNearby {
+			t.Fatalf("unexpected context-to-nearby transition: %+v", first)
+		}
+		seen := map[string]bool{first.ContextMatches[0].ID: true}
+		query.Cursor = first.NextCursor
+		pages := 0
+		for {
+			page, err := reader.ListPublicNotes(ctx, query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(page.ContextMatches) != 0 {
+				t.Fatalf("context phase restarted after nearby phase: %+v", page)
+			}
+			for _, note := range page.Nearby {
+				if seen[note.ID] || note.MatchType != notes.MatchNearby {
+					t.Fatalf("nearby pagination duplicated or mislabeled note: %+v", note)
+				}
+				seen[note.ID] = true
+			}
+			pages++
+			if !page.HasMore {
+				break
+			}
+			if page.NextCursor == nil {
+				t.Fatal("has_more page did not include a cursor")
+			}
+			query.Cursor = page.NextCursor
+		}
+		if pages == 0 || len(seen) < 2 {
+			t.Fatalf("pagination did not return nearby notes: pages=%d seen=%v", pages, seen)
+		}
+	})
+
+	t.Run("combined nearby results include the radius boundary in distance order", func(t *testing.T) {
+		boundaryLabelID := createTestLocation(t, ctx, tx, "broad_area", "Boundary Area", 0, 0)
+		createTestNote(t, ctx, tx, userID, boundaryLabelID, "Boundary area context", "published", time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC))
+		fixtures := []struct {
+			label    string
+			title    string
+			distance float64
+		}{
+			{"Two kilometer point", "Boundary 2000m", 2000},
+			{"Just inside point", "Boundary 4999m", 4999},
+			{"At limit point", "Boundary 5000m", 5000},
+			{"Outside limit point", "Boundary 5001m", 5001},
+		}
+		for index, fixture := range fixtures {
+			var locationID string
+			err := tx.QueryRowContext(ctx, `
+				INSERT INTO locations (location_type, provider, provider_place_id, display_label, coordinates)
+				VALUES ('verified_place', 'test-provider', gen_random_uuid()::text, $1,
+					ST_Project(ST_SetSRID(ST_MakePoint(0::double precision, 0::double precision), 4326)::geography,
+						$2::double precision, 0::double precision))
+				RETURNING id::text`, fixture.label, fixture.distance).Scan(&locationID)
+			if err != nil {
+				t.Fatalf("insert %s boundary fixture: %v", fixture.label, err)
+			}
+			createTestNote(t, ctx, tx, userID, locationID, fixture.title, "published", time.Date(2026, 2, 1, index+1, 0, 0, 0, time.UTC))
+		}
+
+		page, err := reader.ListPublicNotes(ctx, notes.Query{Context: notes.Context{
+			Type: notes.ContextBroadArea, Label: "Boundary Area", Latitude: 0, Longitude: 0, RadiusM: 5000,
+		}, Limit: 20})
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantTitles := []string{"Boundary 2000m", "Boundary 4999m", "Boundary 5000m"}
+		wantDistances := []float64{2000, 4999, 5000}
+		if len(page.ContextMatches) != 1 || page.ContextMatches[0].MatchType != notes.MatchBroadArea {
+			t.Fatalf("unexpected label context results: %+v", page.ContextMatches)
+		}
+		if len(page.Nearby) != len(wantTitles) {
+			t.Fatalf("nearby radius filtering returned %d rows, want %d: %+v", len(page.Nearby), len(wantTitles), page.Nearby)
+		}
+		for index, nearbyNote := range page.Nearby {
+			if nearbyNote.Title != wantTitles[index] || nearbyNote.DistanceM == nil || math.Abs(*nearbyNote.DistanceM-wantDistances[index]) > 0.1 {
+				t.Fatalf("nearby results are not in distance order or have inaccurate distance at index %d: %+v", index, nearbyNote)
+			}
+		}
+	})
+
 	t.Run("map center returns only nearby results within requested radius", func(t *testing.T) {
 		page, err := reader.ListPublicNotes(ctx, notes.Query{Context: notes.Context{Type: notes.ContextMapCenter, Label: "Cafe Example", Latitude: 28, Longitude: 77, RadiusM: 5000}, Limit: 20})
 		if err != nil {
@@ -159,9 +311,8 @@ func openNotesTestTransaction(t *testing.T) *sql.Tx {
 	if dsn == "" {
 		t.Skip("set STREETMAP_TEST_DATABASE_URL to run public notes integration tests")
 	}
-	parsed, err := url.Parse(dsn)
-	if err != nil || !strings.HasSuffix(strings.Trim(parsed.Path, "/"), "_test") {
-		t.Fatal("STREETMAP_TEST_DATABASE_URL must point to a dedicated database ending in _test")
+	if err := validateTestDatabaseURL(dsn); err != nil {
+		t.Fatal("STREETMAP_TEST_DATABASE_URL must use localhost or 127.0.0.1 and target streetmap_test")
 	}
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
@@ -191,6 +342,55 @@ func openNotesTestTransaction(t *testing.T) *sql.Tx {
 		}
 	})
 	return tx
+}
+
+func validateTestDatabaseURL(dsn string) error {
+	parsed, err := url.Parse(dsn)
+	if err != nil || (parsed.Scheme != "postgres" && parsed.Scheme != "postgresql") {
+		return fmt.Errorf("invalid PostgreSQL URL")
+	}
+	host := parsed.Hostname()
+	if !strings.EqualFold(host, "localhost") && host != "127.0.0.1" {
+		return fmt.Errorf("test database host must be loopback")
+	}
+	query, err := url.ParseQuery(parsed.RawQuery)
+	if err != nil || query.Has("host") || query.Has("hostaddr") || query.Has("service") || query.Has("servicefile") {
+		return fmt.Errorf("test database URL must not override its loopback host")
+	}
+	databaseName := strings.Trim(parsed.Path, "/")
+	if databaseName != "streetmap_test" {
+		return fmt.Errorf("test database name must be streetmap_test")
+	}
+	return nil
+}
+
+func TestValidateTestDatabaseURL(t *testing.T) {
+	tests := []struct {
+		name string
+		dsn  string
+		want bool
+	}{
+		{"localhost test database", "postgres://streetmap:local-only@localhost:5432/streetmap_test?sslmode=disable", true},
+		{"IPv4 loopback test database", "postgresql://streetmap:local-only@127.0.0.1:5432/streetmap_test?sslmode=disable", true},
+		{"localhost host is case insensitive", "postgres://streetmap:local-only@LOCALHOST:5432/streetmap_test", true},
+		{"remote hostname", "postgres://streetmap:local-only@db.example.test:5432/streetmap_test", false},
+		{"remote IP address", "postgres://streetmap:local-only@192.0.2.10:5432/streetmap_test", false},
+		{"host override in query", "postgres://streetmap:local-only@localhost:5432/streetmap_test?host=db.example.test", false},
+		{"host address override in query", "postgres://streetmap:local-only@localhost:5432/streetmap_test?hostaddr=192.0.2.10", false},
+		{"empty host", "postgres:///streetmap_test", false},
+		{"missing database name", "postgres://localhost:5432/", false},
+		{"non-test database name", "postgres://localhost:5432/streetmap", false},
+		{"different database with test suffix", "postgres://localhost:5432/another_test", false},
+		{"malformed URL", "not a database URL", false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateTestDatabaseURL(test.dsn)
+			if (err == nil) != test.want {
+				t.Fatalf("validateTestDatabaseURL() error = %v, wantValid %v", err, test.want)
+			}
+		})
+	}
 }
 
 func createTestUser(t *testing.T, ctx context.Context, tx *sql.Tx) string {

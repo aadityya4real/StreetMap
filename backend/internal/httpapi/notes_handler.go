@@ -118,7 +118,7 @@ func (h Handler) listNotes(w http.ResponseWriter, r *http.Request) {
 	if contextResponse.Label == "" {
 		contextResponse.Label = page.ContextLabel
 	}
-	if query.Context.Type == notes.ContextMapCenter {
+	if query.Context.Type == notes.ContextMapCenter || query.Context.RadiusM > 0 {
 		latitude, longitude := query.Context.Latitude, query.Context.Longitude
 		contextResponse.Latitude = &latitude
 		contextResponse.Longitude = &longitude
@@ -181,7 +181,7 @@ func parseNotesQuery(rawQuery string) (notes.Query, *noteSearchError) {
 			return notes.Query{}, &noteSearchError{Field: "cursor", Message: "is invalid"}
 		}
 		cursor, cursorErr := notes.DecodeCursor(rawCursor, contextKey)
-		if cursorErr != nil || !cursorPhaseAllowed(context.Type, cursor.Phase) {
+		if cursorErr != nil || !cursorPhaseAllowed(context, cursor.Phase) {
 			return notes.Query{}, &noteSearchError{Field: "cursor", Message: "is invalid for this context"}
 		}
 		query.Context = context
@@ -214,7 +214,7 @@ func parseNotesContext(values url.Values, contextType string) (notes.Context, *n
 		}
 		context.LocationID = strings.ToLower(values.Get("location_id"))
 	case notes.ContextBroadArea, notes.ContextUnverifiedPlace:
-		if locationIDPresent || hasAny(values, "latitude", "longitude", "radius_m") {
+		if locationIDPresent {
 			return notes.Context{}, &noteSearchError{Field: "context_type", Message: "has incompatible parameters"}
 		}
 		label, labelErr := parseLabel(values)
@@ -222,6 +222,27 @@ func parseNotesContext(values url.Values, contextType string) (notes.Context, *n
 			return notes.Context{}, labelErr
 		}
 		context.Label = label
+		if values.Has("latitude") || values.Has("longitude") {
+			latitude, coordinateErr := parseCoordinate(values, "latitude", -90, 90)
+			if coordinateErr != nil {
+				return notes.Context{}, coordinateErr
+			}
+			longitude, coordinateErr := parseCoordinate(values, "longitude", -180, 180)
+			if coordinateErr != nil {
+				return notes.Context{}, coordinateErr
+			}
+			context.Latitude, context.Longitude = latitude, longitude
+			context.RadiusM = maxNearbyRadiusM
+			if values.Has("radius_m") {
+				radius, parseErr := strconv.Atoi(values.Get("radius_m"))
+				if parseErr != nil || radius < 1 || radius > maxNearbyRadiusM {
+					return notes.Context{}, &noteSearchError{Field: "radius_m", Message: "must be an integer from 1 to 5000"}
+				}
+				context.RadiusM = radius
+			}
+		} else if values.Has("radius_m") {
+			return notes.Context{}, &noteSearchError{Field: "radius_m", Message: "requires latitude and longitude"}
+		}
 	case notes.ContextMapCenter:
 		if locationIDPresent {
 			return notes.Context{}, &noteSearchError{Field: "context_type", Message: "has incompatible parameters"}
@@ -318,12 +339,12 @@ func hasAny(values url.Values, keys ...string) bool {
 	return false
 }
 
-func cursorPhaseAllowed(contextType string, phase notes.CursorPhase) bool {
-	switch contextType {
+func cursorPhaseAllowed(context notes.Context, phase notes.CursorPhase) bool {
+	switch context.Type {
 	case notes.ContextVerifiedPlace:
 		return phase == notes.PhaseExact || phase == notes.PhaseNearby
 	case notes.ContextBroadArea, notes.ContextUnverifiedPlace:
-		return phase == notes.PhaseContext
+		return phase == notes.PhaseContext || (context.RadiusM > 0 && phase == notes.PhaseNearby)
 	case notes.ContextCoordinate:
 		return phase == notes.PhaseExact
 	case notes.ContextMapCenter:

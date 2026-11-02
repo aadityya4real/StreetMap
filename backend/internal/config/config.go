@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"streetmap.in/backend/internal/auth"
+
+	"github.com/joho/godotenv"
 )
 
 type Config struct {
@@ -40,7 +42,42 @@ type AuthConfig struct {
 }
 
 func Load() (Config, error) {
+	environment, _ := os.LookupEnv("STREETMAP_ENV")
+	if err := loadLocalEnvironmentFile(".env", environment, os.LookupEnv, os.Setenv); err != nil {
+		return Config{}, err
+	}
 	return load(os.LookupEnv)
+}
+
+func loadLocalEnvironmentFile(path, environment string, lookup func(string) (string, bool), setenv func(string, string) error) error {
+	if !usesLocalEnvironmentFile(environment) {
+		return nil
+	}
+	values, err := godotenv.Read(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read local environment file")
+	}
+	for key, value := range values {
+		if _, exists := lookup(key); exists {
+			continue
+		}
+		if err := setenv(key, value); err != nil {
+			return fmt.Errorf("apply local environment file")
+		}
+	}
+	return nil
+}
+
+func usesLocalEnvironmentFile(environment string) bool {
+	switch strings.ToLower(strings.TrimSpace(environment)) {
+	case "", "development":
+		return true
+	default:
+		return false
+	}
 }
 
 func load(lookup func(string) (string, bool)) (Config, error) {

@@ -7,6 +7,7 @@ import { createRoot } from 'react-dom/client';
 import NoteCard from '../src/popup/components/NoteCard.tsx';
 import NotesList from '../src/popup/components/NotesList.tsx';
 import SearchInput from '../src/popup/components/SearchInput.tsx';
+import { useNoteSearch } from '../src/popup/hooks/useNoteSearch.ts';
 
 const window = new Window();
 globalThis.window = window;
@@ -36,6 +37,9 @@ function mount(element) {
   act(() => root.render(element));
   return {
     container,
+    update(element) {
+      act(() => root.render(element));
+    },
     unmount() {
       act(() => root.unmount());
       container.remove();
@@ -150,6 +154,35 @@ test('only the notes list reports its own scroll position', () => {
 
     act(() => mounted.container.dispatchEvent(new window.Event('scroll', { bubbles: true })));
     assert.deepEqual(scrollPositions, [28]);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test('search filters loaded notes and clearing the query restores the full set', () => {
+  const secondNote = {
+    ...displayNote,
+    id: 'b5a98c68-04a2-4822-bf9b-36235008f68a',
+    title: 'A quiet shortcut',
+    body: 'A short path through the market.',
+    match: { type: 'exact_location', location_label: 'Market Arcade' },
+    group: 'exact',
+  };
+  function SearchResults({ query }) {
+    const results = useNoteSearch([displayNote, secondNote], query);
+    return React.createElement('ul', null, results.map((item) => React.createElement('li', { key: item.id }, item.title)));
+  }
+
+  const mounted = mount(React.createElement(SearchResults, { query: 'tea' }));
+  try {
+    assert.equal(mounted.container.querySelectorAll('li').length, 1);
+    assert.match(mounted.container.textContent, /Tea stall/);
+
+    mounted.update(React.createElement(SearchResults, { query: '' }));
+    assert.equal(mounted.container.querySelectorAll('li').length, 2);
+
+    mounted.update(React.createElement(SearchResults, { query: 'no matching note' }));
+    assert.equal(mounted.container.querySelectorAll('li').length, 0);
   } finally {
     mounted.unmount();
   }

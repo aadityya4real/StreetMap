@@ -15,6 +15,8 @@ import {
 const broadContext = { type: 'broad_area', label: 'Greater Noida, Uttar Pradesh' };
 const placeContext = { type: 'place_page_unverified', label: 'GP Hotel & Banquet' };
 const centerContext = { type: 'map_center', latitude: 26.8178068, longitude: 80.9071453 };
+const broadWithCenter = { ...broadContext, mapCenter: { latitude: 28.4983349, longitude: 77.4334236 } };
+const placeWithCenter = { ...placeContext, mapCenter: { latitude: centerContext.latitude, longitude: centerContext.longitude } };
 const note = {
   id: '8bc2b4ce-4277-4139-825d-c559694c8524',
   title: 'Tea stall behind the bus stop',
@@ -29,7 +31,12 @@ const note = {
 function envelope(context, overrides = {}) {
   return {
     data: {
-      context: { type: context.type, ...(context.label ? { label: context.label } : {}), ...(context.latitude !== undefined ? { latitude: context.latitude, longitude: context.longitude } : {}) },
+      context: {
+        type: context.type,
+        ...(context.label ? { label: context.label } : {}),
+        ...(context.latitude !== undefined ? { latitude: context.latitude, longitude: context.longitude } : {}),
+        ...(context.mapCenter ? { latitude: context.mapCenter.latitude, longitude: context.mapCenter.longitude } : {}),
+      },
       exact: [],
       context_matches: [],
       nearby: [],
@@ -70,6 +77,26 @@ test('parses nearby notes with distance and rejects presenting them as exact', (
   );
 });
 
+test('keeps label matches and map-center discoveries in separate groups', () => {
+  const nearbyNote = { ...note, id: 'a3456789-4277-4139-825d-c559694c8524', match: { type: 'nearby', location_label: 'Nearby market', distance_m: 640 } };
+  const response = parsePublicNotesResponse(
+    envelope(placeWithCenter, { context_matches: [note], nearby: [nearbyNote] }),
+    placeWithCenter,
+  );
+  assert.equal(response.context.type, 'place_page_unverified');
+  assert.equal(response.context.label, placeContext.label);
+  assert.equal(response.context.latitude, centerContext.latitude);
+  assert.deepEqual(getDisplayNotes(response).map(({ group }) => group), ['context_matches', 'nearby']);
+});
+
+test('rejects duplicate IDs across context-match and nearby groups', () => {
+  const nearbyDuplicate = { ...note, match: { type: 'nearby', location_label: 'Nearby market', distance_m: 640 } };
+  assert.throws(
+    () => parsePublicNotesResponse(envelope(placeWithCenter, { context_matches: [note], nearby: [nearbyDuplicate] }), placeWithCenter),
+    InvalidNotesResponseError,
+  );
+});
+
 test('rejects invalid, mismatched, and malformed API envelopes', () => {
   assert.throws(() => parsePublicNotesResponse({}, broadContext), InvalidNotesResponseError);
   assert.throws(() => parsePublicNotesResponse(envelope(placeContext), broadContext), InvalidNotesResponseError);
@@ -79,9 +106,18 @@ test('rejects invalid, mismatched, and malformed API envelopes', () => {
   );
 });
 
+test('rejects duplicate note IDs in a response page', () => {
+  assert.throws(
+    () => parsePublicNotesResponse(envelope(placeContext, { context_matches: [note, note] }), placeContext),
+    InvalidNotesResponseError,
+  );
+});
+
 test('only sends context the extension can establish and never reuses Maps place IDs', () => {
   assert.deepEqual(getNotesRequestContext({ status: 'broad-area', sourceHostname: 'www.google.com', source: 'search-query', label: broadContext.label }), broadContext);
   assert.deepEqual(getNotesRequestContext({ status: 'place-page-unverified', sourceHostname: 'www.google.com', label: placeContext.label }), placeContext);
+  assert.deepEqual(getNotesRequestContext({ status: 'broad-area', sourceHostname: 'www.google.com', source: 'search-query', label: broadContext.label, mapCenter: broadWithCenter.mapCenter }), broadWithCenter);
+  assert.deepEqual(getNotesRequestContext({ status: 'place-page-unverified', sourceHostname: 'www.google.com', label: placeContext.label, mapCenter: placeWithCenter.mapCenter }), placeWithCenter);
   assert.deepEqual(getNotesRequestContext({ status: 'map-center', sourceHostname: 'www.google.com', mapCenter: { latitude: centerContext.latitude, longitude: centerContext.longitude } }), centerContext);
   assert.equal(getNotesRequestContext({ status: 'unverified-place-reference', sourceHostname: 'www.google.com', placeId: 'ChIJsomething' }), null);
   assert.equal(getNotesRequestContext({ status: 'maps-no-location', sourceHostname: 'www.google.com' }), null);
@@ -99,6 +135,14 @@ test('builds exactly one API selector with bounded map-center radius and paginat
   assert.equal(centerUrl.get('radius_m'), '5000');
   assert.equal(centerUrl.get('label'), null);
   assert.equal(centerUrl.get('location_id'), null);
+
+  const combinedUrl = buildNotesUrl('http://127.0.0.1:8080/api/v1', placeWithCenter).searchParams;
+  assert.equal(combinedUrl.get('context_type'), 'place_page_unverified');
+  assert.equal(combinedUrl.get('label'), placeContext.label);
+  assert.equal(combinedUrl.get('latitude'), String(centerContext.latitude));
+  assert.equal(combinedUrl.get('longitude'), String(centerContext.longitude));
+  assert.equal(combinedUrl.get('radius_m'), '5000');
+  assert.equal(combinedUrl.get('location_id'), null);
 });
 
 test('development endpoint defaults to loopback and production requires configuration', () => {
@@ -139,5 +183,14 @@ test('distinguishes service failures from invalid response content', async () =>
   await assert.rejects(
     () => requestPublicNotes('https://api.streetmap.in/api/v1', broadContext, new globalThis.AbortController().signal, undefined, async () => new globalThis.Response('<html>gateway</html>', { headers: { 'content-type': 'text/html' } })),
     InvalidNotesResponseError,
+  );
+  await assert.rejects(
+    () => requestPublicNotes('https://api.streetmap.in/api/v1', broadContext, new globalThis.AbortController().signal, undefined, async () => { throw new TypeError('network disconnected'); }),
+    NotesRequestError,
+  );
+  const abort = new globalThis.DOMException('request aborted', 'AbortError');
+  await assert.rejects(
+    () => requestPublicNotes('https://api.streetmap.in/api/v1', broadContext, new globalThis.AbortController().signal, undefined, async () => { throw abort; }),
+    (error) => error === abort,
   );
 });

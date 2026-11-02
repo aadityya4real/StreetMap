@@ -4,6 +4,7 @@ import Header from './components/Header';
 import LocationContextPanel from './components/LocationContextPanel';
 import NotesList from './components/NotesList';
 import SearchInput from './components/SearchInput';
+import { updateNotesScrollProgress } from './hooks/notesScrollCollapse';
 import { useNoteSearch } from './hooks/useNoteSearch';
 import { getActiveLocationContext } from './services/locationContext';
 import {
@@ -27,8 +28,6 @@ type NotesState =
       hasMore: boolean;
     };
 
-const SEARCH_COLLAPSE_SCROLL_THRESHOLD_PX = 24;
-
 export default function App() {
   const [query, setQuery] = useState('');
   const [isSearchExpanded, setIsSearchExpanded] = useState(false);
@@ -50,16 +49,19 @@ export default function App() {
   }, [isSearchExpanded]);
 
   const handleNotesListScroll = useCallback((scrollTop: number) => {
-    const scrollDelta = scrollTop - lastNotesScrollTop.current;
-    lastNotesScrollTop.current = scrollTop;
-
-    if (!isSearchExpanded || scrollDelta <= 0) {
+    if (!isSearchExpanded) {
+      lastNotesScrollTop.current = scrollTop;
       downwardScrollDistance.current = 0;
       return;
     }
 
-    downwardScrollDistance.current += scrollDelta;
-    if (downwardScrollDistance.current >= SEARCH_COLLAPSE_SCROLL_THRESHOLD_PX) {
+    const update = updateNotesScrollProgress({
+      lastScrollTop: lastNotesScrollTop.current,
+      downwardDistance: downwardScrollDistance.current,
+    }, scrollTop);
+    lastNotesScrollTop.current = update.progress.lastScrollTop;
+    downwardScrollDistance.current = update.progress.downwardDistance;
+    if (update.shouldCollapse) {
       downwardScrollDistance.current = 0;
       setIsSearchExpanded(false);
     }
