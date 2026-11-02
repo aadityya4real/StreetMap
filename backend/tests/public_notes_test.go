@@ -7,6 +7,8 @@ import (
 	"math"
 	"net/url"
 	"os"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -107,6 +109,21 @@ func TestPublicNotesContextsAndNearbyPolicy(t *testing.T) {
 		}
 		if len(page.ContextMatches) != 1 || page.ContextMatches[0].Title != "URL label note" || page.ContextMatches[0].MatchType != notes.MatchUnverifiedReference || len(page.Nearby) != 0 {
 			t.Fatalf("unexpected unverified label results: %+v", page)
+		}
+	})
+
+	t.Run("identical labels preserve distinct location identities", func(t *testing.T) {
+		firstLocation := createTestLocation(t, ctx, tx, "broad_area", "Shared Area Label", 0, 0)
+		secondLocation := createTestLocation(t, ctx, tx, "broad_area", "  shared area label  ", 0, 0)
+		firstNote := createTestNote(t, ctx, tx, userID, firstLocation, "First identity note", "published", time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC))
+		secondNote := createTestNote(t, ctx, tx, userID, secondLocation, "Second identity note", "published", time.Date(2026, 3, 2, 0, 0, 0, 0, time.UTC))
+
+		page, err := reader.ListPublicNotes(ctx, notes.Query{Context: notes.Context{Type: notes.ContextBroadArea, Label: "Shared Area Label"}, Limit: 20})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.ContextMatches) != 2 || page.ContextMatches[0].ID != secondNote || page.ContextMatches[1].ID != firstNote {
+			t.Fatalf("same-label locations were merged, omitted, or misordered: %+v", page.ContextMatches)
 		}
 	})
 
@@ -280,6 +297,104 @@ func TestPublicNotesContextsAndNearbyPolicy(t *testing.T) {
 		}
 		if !foundNear {
 			t.Fatalf("expected within-radius nearby note, got %+v", page.Nearby)
+		}
+	})
+
+	t.Run("nearby pagination is deterministic for dense equal-distance results", func(t *testing.T) {
+		createdAt := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+		wantIDs := make([]string, 0, 7)
+		for index := 0; index < 7; index++ {
+			var locationID string
+			err := tx.QueryRowContext(ctx, `
+				INSERT INTO locations (location_type, provider, provider_place_id, display_label, coordinates)
+				VALUES ('verified_place', 'test-provider', gen_random_uuid()::text, $1,
+					ST_Project(ST_SetSRID(ST_MakePoint(0::double precision, 0::double precision), 4326)::geography,
+						1000::double precision, 90::double precision))
+				RETURNING id::text`, fmt.Sprintf("Equal-distance location %d", index)).Scan(&locationID)
+			if err != nil {
+				t.Fatalf("insert equal-distance location: %v", err)
+			}
+			wantIDs = append(wantIDs, createTestNote(t, ctx, tx, userID, locationID, fmt.Sprintf("Equal-distance note %d", index), "published", createdAt))
+		}
+		sort.Sort(sort.Reverse(sort.StringSlice(wantIDs)))
+
+		query := notes.Query{Context: notes.Context{Type: notes.ContextMapCenter, Latitude: 0, Longitude: 0, RadiusM: 1500}, Limit: 2}
+		seen := make([]string, 0, len(wantIDs))
+		for {
+			page, err := reader.ListPublicNotes(ctx, query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, note := range page.Nearby {
+				seen = append(seen, note.ID)
+				if note.DistanceM == nil || math.Abs(*note.DistanceM-1000) > 0.1 {
+					t.Fatalf("equal-distance fixture has unexpected distance: %+v", note)
+				}
+			}
+			if !page.HasMore {
+				break
+			}
+			if page.NextCursor == nil {
+				t.Fatal("has_more page did not include a cursor")
+			}
+			query.Cursor = page.NextCursor
+		}
+		if !slices.Equal(seen, wantIDs) {
+			t.Fatalf("dense pagination was not deterministic or skipped/repeated results: got %v, want %v", seen, wantIDs)
+		}
+	})
+
+	t.Run("nearby query excludes locations without coordinates and empty results have no cursor", func(t *testing.T) {
+		var locationID string
+		if err := tx.QueryRowContext(ctx, `
+			INSERT INTO locations (location_type, provider, provider_place_id, display_label)
+			VALUES ('verified_place', 'test-provider', gen_random_uuid()::text, 'Unlocated verified place')
+			RETURNING id::text`).Scan(&locationID); err != nil {
+			t.Fatalf("insert verified place without coordinates: %v", err)
+		}
+		createTestNote(t, ctx, tx, userID, locationID, "Unlocated note", "published", time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC))
+		page, err := reader.ListPublicNotes(ctx, notes.Query{Context: notes.Context{Type: notes.ContextMapCenter, Latitude: -90, Longitude: -180, RadiusM: 1}, Limit: 20})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Nearby) != 0 || page.HasMore || page.NextCursor != nil {
+			t.Fatalf("empty nearby result returned rows or a continuation cursor: %+v", page)
+		}
+	})
+
+	t.Run("verified place with null coordinates retains exact notes without nearby results", func(t *testing.T) {
+		var locationID string
+		if err := tx.QueryRowContext(ctx, `
+			INSERT INTO locations (location_type, provider, provider_place_id, display_label)
+			VALUES ('verified_place', 'test-provider', gen_random_uuid()::text, 'Verified place without point')
+			RETURNING id::text`).Scan(&locationID); err != nil {
+			t.Fatalf("insert verified place without coordinates: %v", err)
+		}
+		exactID := createTestNote(t, ctx, tx, userID, locationID, "Exact note without point", "published", time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
+		page, err := reader.ListPublicNotes(ctx, notes.Query{Context: notes.Context{Type: notes.ContextVerifiedPlace, LocationID: locationID}, Limit: 20})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Exact) != 1 || page.Exact[0].ID != exactID || len(page.Nearby) != 0 {
+			t.Fatalf("null point broke exact results or produced nearby results: %+v", page)
+		}
+	})
+
+	t.Run("spatial index is present and valid", func(t *testing.T) {
+		var valid bool
+		if err := tx.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM pg_index i
+				JOIN pg_class index_class ON index_class.oid = i.indexrelid
+				JOIN pg_am access_method ON access_method.oid = index_class.relam
+				WHERE index_class.relname = 'locations_coordinates_gist'
+					AND access_method.amname = 'gist'
+					AND i.indisvalid AND i.indisready
+			)`).Scan(&valid); err != nil {
+			t.Fatalf("inspect spatial index: %v", err)
+		}
+		if !valid {
+			t.Fatal("locations_coordinates_gist is missing or invalid")
 		}
 	})
 

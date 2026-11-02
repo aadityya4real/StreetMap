@@ -54,6 +54,21 @@ func TestListNotesParsesSupportedContexts(t *testing.T) {
 	}
 }
 
+func TestListNotesAcceptsCoordinateBoundaries(t *testing.T) {
+	var got notes.Query
+	handler := notesHandler(notesReaderFunc(func(_ context.Context, query notes.Query) (notes.Page, error) {
+		got = query
+		return emptyNotesPage(), nil
+	}))
+	response := request(handler, http.MethodGet, "/api/v1/notes?context_type=map_center&latitude=-90&longitude=180")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if got.Context.Latitude != -90 || got.Context.Longitude != 180 {
+		t.Fatalf("coordinate boundary parsed as (%v, %v), want (-90, 180)", got.Context.Latitude, got.Context.Longitude)
+	}
+}
+
 func TestListNotesRejectsInvalidContextsAndBounds(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -68,6 +83,9 @@ func TestListNotesRejectsInvalidContextsAndBounds(t *testing.T) {
 		{"unknown context", "context_type=place", "context_type"},
 		{"map center missing coordinates", "context_type=map_center&latitude=1", "longitude"},
 		{"invalid latitude", "context_type=map_center&latitude=91&longitude=1", "latitude"},
+		{"latitude below minimum", "context_type=map_center&latitude=-90.0001&longitude=1", "latitude"},
+		{"longitude above maximum", "context_type=map_center&latitude=1&longitude=180.0001", "longitude"},
+		{"longitude below minimum", "context_type=map_center&latitude=1&longitude=-180.0001", "longitude"},
 		{"nonfinite longitude", "context_type=map_center&latitude=1&longitude=NaN", "longitude"},
 		{"radius over limit", "context_type=map_center&latitude=1&longitude=1&radius_m=5001", "radius_m"},
 		{"zero limit", "context_type=broad_area&label=Town&limit=0", "limit"},
