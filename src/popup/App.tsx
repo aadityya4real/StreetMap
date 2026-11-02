@@ -5,39 +5,28 @@ import LocationContextPanel from './components/LocationContextPanel';
 import NotesList from './components/NotesList';
 import SearchInput from './components/SearchInput';
 import { updateNotesScrollProgress } from './hooks/notesScrollCollapse';
+import useNotesFeed from './hooks/useNotesFeed';
 import { useNoteSearch } from './hooks/useNoteSearch';
-import { getActiveLocationContext } from './services/locationContext';
-import {
-  fetchPublicNotes,
-  getDisplayNotes,
-  getNotesRequestContext,
-  InvalidNotesResponseError,
-  NotesConfigurationError,
-  type NotesRequestContext,
-} from './services/publicNotes';
-import type { DisplayNote, PublicNotesPage } from './types/note';
-
-type NotesState =
-  | { status: 'loading' }
-  | { status: 'error'; message: string }
-  | {
-      status: 'ready';
-      notes: DisplayNote[];
-      requestContext: NotesRequestContext | null;
-      nextCursor: string | null;
-      hasMore: boolean;
-    };
+import { getActiveLocationContext, subscribeToActiveTabLocationChanges } from './services/locationContext';
+import { fetchPublicNotes } from './services/publicNotes';
 
 export default function App() {
   const [query, setQuery] = useState('');
   const [isSearchExpanded, setIsSearchExpanded] = useState(false);
   const [shareMessage, setShareMessage] = useState('');
-  const [locationContext, setLocationContext] = useState<LocationContext>({ status: 'loading' });
-  const [notesState, setNotesState] = useState<NotesState>({ status: 'loading' });
-  const [refreshCount, setRefreshCount] = useState(0);
-  const [isLoadingMore, setIsLoadingMore] = useState(false);
-  const [loadMoreError, setLoadMoreError] = useState('');
-  const loadMoreController = useRef<AbortController | null>(null);
+  const {
+    locationContext,
+    notesState,
+    isLoadingMore,
+    loadMoreError,
+    refreshLocationContext,
+    retryNotes,
+    loadMore,
+  } = useNotesFeed({
+    readLocationContext: getActiveLocationContext,
+    loadNotesPage: fetchPublicNotes,
+    subscribeToLocationChanges: subscribeToActiveTabLocationChanges,
+  });
   const notesListRef = useRef<HTMLDivElement>(null);
   const lastNotesScrollTop = useRef(0);
   const downwardScrollDistance = useRef(0);
@@ -66,87 +55,6 @@ export default function App() {
       setIsSearchExpanded(false);
     }
   }, [isSearchExpanded]);
-
-  const refreshLocationContext = useCallback(() => {
-    setLocationContext({ status: 'loading' });
-    setNotesState({ status: 'loading' });
-    loadMoreController.current?.abort();
-    setIsLoadingMore(false);
-    setLoadMoreError('');
-    setRefreshCount((count) => count + 1);
-  }, []);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    let isCurrent = true;
-
-    async function loadNotes() {
-      setLocationContext({ status: 'loading' });
-      setNotesState({ status: 'loading' });
-      try {
-        const context = await getActiveLocationContext();
-        if (!isCurrent) return;
-        setLocationContext(context);
-
-        const requestContext = getNotesRequestContext(context);
-        if (!requestContext) {
-          setNotesState({
-            status: 'ready',
-            notes: [],
-            requestContext: null,
-            nextCursor: null,
-            hasMore: false,
-          });
-          return;
-        }
-
-        const page = await fetchPublicNotes(requestContext, controller.signal);
-        if (!isCurrent) return;
-        setNotesState(toReadyState(page, requestContext));
-      } catch (error) {
-        if (!isCurrent || isAbortError(error)) return;
-        setNotesState({ status: 'error', message: getNotesErrorMessage(error) });
-      }
-    }
-
-    void loadNotes();
-    return () => {
-      isCurrent = false;
-      controller.abort();
-      loadMoreController.current?.abort();
-      loadMoreController.current = null;
-    };
-  }, [refreshCount]);
-
-  const retryNotes = useCallback(() => {
-    setRefreshCount((count) => count + 1);
-  }, []);
-
-  const loadMore = useCallback(async () => {
-    if (notesState.status !== 'ready' || !notesState.requestContext || !notesState.nextCursor || isLoadingMore) return;
-    const controller = new AbortController();
-    loadMoreController.current = controller;
-    setIsLoadingMore(true);
-    setLoadMoreError('');
-    try {
-      const page = await fetchPublicNotes(notesState.requestContext, controller.signal, notesState.nextCursor);
-      setNotesState((current) => current.status === 'ready'
-        ? {
-            ...current,
-            notes: [...current.notes, ...getDisplayNotes(page)],
-            nextCursor: page.page.next_cursor,
-            hasMore: page.page.has_more,
-          }
-        : current);
-    } catch (error) {
-      if (!isAbortError(error)) setLoadMoreError(getNotesErrorMessage(error));
-    } finally {
-      if (loadMoreController.current === controller) {
-        loadMoreController.current = null;
-        setIsLoadingMore(false);
-      }
-    }
-  }, [isLoadingMore, notesState]);
 
   const noteEmptyMessage = notesState.status === 'ready' && !notesState.requestContext
     ? getNoContextMessage(locationContext)
@@ -227,26 +135,6 @@ export default function App() {
       </footer>
     </div>
   );
-}
-
-function toReadyState(page: PublicNotesPage, requestContext: NotesRequestContext): NotesState {
-  return {
-    status: 'ready',
-    notes: getDisplayNotes(page),
-    requestContext,
-    nextCursor: page.page.next_cursor,
-    hasMore: page.page.has_more,
-  };
-}
-
-function isAbortError(error: unknown): boolean {
-  return error instanceof DOMException && error.name === 'AbortError';
-}
-
-function getNotesErrorMessage(error: unknown): string {
-  if (error instanceof NotesConfigurationError) return error.message;
-  if (error instanceof InvalidNotesResponseError) return error.message;
-  return 'StreetMap could not load community notes. Check your connection or local API, then try again.';
 }
 
 function getNoContextMessage(context: LocationContext): string {
