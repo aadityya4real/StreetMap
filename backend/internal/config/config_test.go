@@ -18,11 +18,45 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.HTTPAddr != "127.0.0.1:8080" || cfg.DBMaxOpenConns != 10 || cfg.DBMaxIdleConns != 5 {
 		t.Fatalf("unexpected defaults: %+v", cfg)
 	}
+	if cfg.NoteCreationMaxPerWindow != 3 || cfg.NoteCreationWindow != time.Hour {
+		t.Fatalf("unexpected note creation rate-limit defaults: max=%d window=%s", cfg.NoteCreationMaxPerWindow, cfg.NoteCreationWindow)
+	}
 	if cfg.HTTPReadTimeout != 10*time.Second || cfg.ShutdownTimeout != 10*time.Second {
 		t.Fatalf("unexpected timeout defaults: %+v", cfg)
 	}
 	if cfg.Auth.Enabled {
 		t.Fatal("authentication should remain optional when Supabase configuration is absent")
+	}
+}
+
+func TestLoadConfiguresConservativeNoteCreationRateLimit(t *testing.T) {
+	base := map[string]string{
+		"DATABASE_URL":                 "postgres://streetmap:local-only@localhost:5432/streetmap?sslmode=disable",
+		"NOTE_CREATION_MAX_PER_WINDOW": "2",
+		"NOTE_CREATION_WINDOW":         "30m",
+	}
+	cfg, err := load(values(base))
+	if err != nil {
+		t.Fatalf("load configured rate limit: %v", err)
+	}
+	if cfg.NoteCreationMaxPerWindow != 2 || cfg.NoteCreationWindow != 30*time.Minute {
+		t.Fatalf("rate limit = %d/%s, want 2/30m", cfg.NoteCreationMaxPerWindow, cfg.NoteCreationWindow)
+	}
+
+	for _, invalid := range []map[string]string{
+		{"NOTE_CREATION_MAX_PER_WINDOW": "0"},
+		{"NOTE_CREATION_MAX_PER_WINDOW": "101"},
+		{"NOTE_CREATION_WINDOW": "30s"},
+		{"NOTE_CREATION_WINDOW": "25h"},
+		{"NOTE_CREATION_WINDOW": "not-a-duration"},
+	} {
+		valuesToLoad := map[string]string{"DATABASE_URL": base["DATABASE_URL"]}
+		for key, value := range invalid {
+			valuesToLoad[key] = value
+		}
+		if _, err := load(values(valuesToLoad)); err == nil {
+			t.Errorf("invalid rate-limit configuration was accepted: %v", invalid)
+		}
 	}
 }
 

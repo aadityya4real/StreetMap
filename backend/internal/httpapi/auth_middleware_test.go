@@ -105,7 +105,7 @@ func TestRequireAuthenticationHidesInternalErrorsAndFailsClosed(t *testing.T) {
 func TestPublicRoutesRemainAnonymousAndAuthenticatedWrapperFailsClosed(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	reader := notesReaderFunc(func(context.Context, notes.Query) (notes.Page, error) { return emptyNotesPage(), nil })
-	server := NewHandler(pingerFunc(func(context.Context) error { return nil }), reader, logger, time.Second)
+	server := NewHandler(pingerFunc(func(context.Context) error { return nil }), reader, logger, time.Second, nil, nil)
 	for _, path := range []string{"/api/v1/health", "/api/v1/ready", "/api/v1/notes?context_type=map_center&latitude=0&longitude=0"} {
 		t.Run(path, func(t *testing.T) {
 			request := httptest.NewRequest(http.MethodGet, path, nil)

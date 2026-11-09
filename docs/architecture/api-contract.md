@@ -1,17 +1,17 @@
-# StreetMap API contract (proposal)
+# StreetMap API contract
 
-**Status:** the public note-discovery endpoint is implemented for exact verified locations, explicit coordinate contexts, broad-area labels, unverified place labels, and bounded map-center nearby searches. Note detail and all mutation endpoints remain proposals.
-**Current implementation:** `GET /api/v1/health`, `GET /api/v1/ready`, and `GET /api/v1/notes`, with JSON envelopes and validation errors.
+**Status:** public note discovery and authenticated note creation are implemented. Note detail, editing, voting, reporting, and moderation routes remain proposals.
+**Current implementation:** `GET /api/v1/health`, `GET /api/v1/ready`, anonymous `GET /api/v1/notes`, and authenticated `POST /api/v1/notes`.
 
 ## Contract conventions
 
 - Base path is `/api/v1`; production traffic is HTTPS only. IDs are UUID strings. Timestamps are RFC 3339 UTC strings. JSON uses `snake_case`.
 - Success bodies use `{ "data": ... }`. Errors use `{ "error": { "code": "...", "message": "...", "fields": { "field": "reason" } }`; `fields` is optional and messages never include SQL, credentials, stack traces, or provider internals. This preserves the envelope already used by the Go HTTP API.
-- JSON request bodies are UTF-8, capped at 16 KiB for note and report writes, decoded once, and reject unknown fields. Responses set JSON content type and `X-Content-Type-Options: nosniff`.
-- Public reads return only published notes and public author display names. They never include email, report details, hidden/removed/pending content, private moderation notes, or internal account status.
+- Note creation JSON request bodies are capped at 32 KiB, decoded once, and reject unknown fields. Responses set JSON content type and `X-Content-Type-Options: nosniff`.
+- Public reads return only published notes and public author display names. They never include email, report details, hidden/removed content, private moderation notes, or internal account status.
 - Mutations require a valid StreetMap user identity. The backend resolves author identity from authentication, never a caller-supplied `author_user_id`.
 - `limit` defaults to 20 and values outside 1–50 are rejected. `cursor` is a base64url continuation token whose format, phase, sort keys, and context hash are validated by the server and bound to the request context/order. It is pagination state, not an authorization or integrity credential. Stable ordering uses the primary sort key plus note UUID as a tie-breaker. Do not use offset pagination for a changing feed.
-- Validation failures are `400 validation_error` with field keys; malformed JSON is `400 invalid_json`; unauthenticated is `401 unauthenticated`; disallowed operation is `403 forbidden`; absent or non-public resource is `404 not_found`; uniqueness/state conflict is `409 conflict`; oversized body is `413 request_too_large`; throttling is `429 rate_limited` with `Retry-After`; unexpected errors are safe `500 internal_error`.
+- Validation failures are `400 validation_error` with field keys; malformed JSON is `400 invalid_json`; unauthenticated is `401 unauthorized`; suspended/deleted account is `403 account_unavailable`; absent resource is `404 not_found`; idempotency conflict is `409 idempotency_conflict`; unsupported media type is `415 unsupported_media_type`; oversized body is `413 request_too_large`; throttling is `429 note_creation_rate_limited` with `Retry-After`; unexpected errors are safe `500 internal_error`.
 
 ## Endpoint inventory
 
@@ -21,7 +21,7 @@
 | `GET /api/v1/ready` | Public | Dependency readiness; current behavior retained. |
 | `GET /api/v1/notes` | Public | Exact-context, broad-area, or bounded nearby note discovery. |
 | `GET /api/v1/notes/{note_id}` | Public (proposed) | One published note; not implemented in this milestone. |
-| `POST /api/v1/notes` | Authenticated | Submit a note for review. |
+| `POST /api/v1/notes` | Authenticated | Publish a new note immediately. |
 | `PATCH /api/v1/notes/{note_id}` | Authenticated owner | Edit an eligible own note. |
 | `DELETE /api/v1/notes/{note_id}` | Authenticated owner | Soft-remove own note. |
 | `PUT /api/v1/notes/{note_id}/vote` | Authenticated | Add or idempotently ensure own helpful vote. |
@@ -104,7 +104,7 @@ Example:
 
 `context.type` and `match.type` are server-defined provenance. `exact` is used only for a verified StreetMap `location_id` or an exact persisted coordinate-only point; label-based results use `context_matches` with `broad_area` or `unverified_reference_label`. Nearby results are in their own collection, have a distance and source label, and must never be rendered as notes about the selected place. The public response exposes only note content, author display name, timestamp, helpful-vote count, and match provenance; it does not expose email, account status, or reports. A nearby query excludes non-published notes and is bounded to a three-second database context and a page limit of 50. When no matches exist, return empty arrays and the requested context; do not guess a location.
 
-`GET /api/v1/notes/{note_id}` returns `{ "data": { "note": ... } }` for a published note. A hidden, removed, pending, rejected, or unknown note is indistinguishable to a public caller (`404`).
+`GET /api/v1/notes/{note_id}` returns `{ "data": { "note": ... } }` for a published note. A hidden, removed, or unknown note is indistinguishable to a public caller (`404`). This route is not implemented yet.
 
 ## Mutations
 
@@ -112,16 +112,51 @@ Example:
 
 `POST /api/v1/notes`
 
+Requires one valid Supabase bearer access token and one `Idempotency-Key` UUID header. The backend resolves the internal user from the validated `(issuer, subject)` identity; no client-supplied author ID is accepted. Each account is limited by `NOTE_CREATION_MAX_PER_WINDOW` within `NOTE_CREATION_WINDOW` (defaults: 3 notes per 1h). Replaying the same key and normalized payload returns the original note with `200`; using the same key with a different payload returns `409 idempotency_conflict`. New notes return `201` and are immediately `published`.
+
 ```json
 {
-  "location": { "type": "location_id", "id": "7c48a51e-3d31-4a34-b503-88747a555a74" },
+  "location": { "type": "verified", "location_id": "7c48a51e-3d31-4a34-b503-88747a555a74" },
   "title": "The quiet courtyard entrance",
   "body": "Use the lane beside the bakery; it is open during business hours.",
   "category": "local_tip"
 }
 ```
 
-Allow `location` as a discriminated union only: existing StreetMap `location_id`, a bounded label reference, or an explicit user-confirmed coordinate. Do not accept `author_user_id`, arbitrary status, vote count, provider verification claims, or a client-specified moderation state. `title` 3–120 chars; `body` 1–5000; categories are `hidden_gem`, `shortcut`, `local_tip`, `parking`, `warning`; trim for validation and store normalized user input consistently. Return `201` plus the note ID and `pending` state after the schema is migrated to support review-before-publication. Current schema defaults new notes directly to `published`; do not expose note creation until the pending-state migration and moderation path are ready.
+`location` is a strict discriminated union:
+
+```json
+{ "type": "unverified", "label": "GP Hotel & Banquet" }
+{ "type": "broad", "label": "Greater Noida" }
+{ "type": "coordinates", "label": "Near the west gate", "latitude": 28.5, "longitude": 77.2, "user_confirmed": true }
+```
+
+`verified` accepts only an existing `verified_place` StreetMap `location_id`; labels, coordinates, or provider assertions cannot promote an unverified reference. `unverified` and `broad` require a label and persist as their corresponding location kinds without coordinates. `coordinates` requires finite latitude in `[-90,90]`, longitude in `[-180,180]`, and explicit `user_confirmed: true`; it persists as `coordinate_only`. The coordinate confirmation is a request-contract assertion that the UI must collect from an explicit user action. A Google Maps viewport center is not sufficient and is not accepted as an implicit venue coordinate. If a coordinate label is omitted, the server stores `User-confirmed coordinates`.
+
+The server trims title, body, and labels, validates Unicode character lengths, and accepts categories `hidden_gem`, `shortcut`, `local_tip`, `parking`, `warning`, `road_condition`, `safety`, and `other`. Title length is 3–120 characters; body is 1–5000; labels are 1–200. The body may contain line breaks and tabs but not other control characters. The JSON request is limited to 32 KiB. Unknown fields are rejected, including `author_user_id`, `user_id`, `status`, `vote_count`, and verification flags.
+
+Example response:
+
+```json
+{
+  "data": {
+    "note": {
+      "id": "8bc2b4ce-4277-4139-825d-c559694c8524",
+      "title": "The quiet courtyard entrance",
+      "body": "Use the lane beside the bakery; it is open during business hours.",
+      "category": "local_tip",
+      "author": { "display_name": "Mira" },
+      "created_at": "2026-11-10T08:30:00Z",
+      "helpful_vote_count": 0,
+      "match": { "type": "exact_location", "location_label": "Verified cafe" }
+    }
+  }
+}
+```
+
+Migration `00004_note_creation.sql` adds categories without changing existing notes and creates `note_creation_requests`, keyed by internal user ID and idempotency UUID. It stores a SHA-256 hash of the normalized payload and the successful note ID. The record is kept for the lifetime of the note so retries remain safe; a future retention policy must preserve the no-duplicate guarantee. The migration rollback refuses while any notes use one of the three added categories; rolling back also removes idempotency records, so it should be used only as a reviewed schema rollback.
+
+The write transaction locks the active internal user row, checks idempotency before rate limiting, creates or resolves the location, explicitly inserts a `published` note, and records the idempotency result atomically. The lock serializes concurrent writes from the same account, protecting both duplicate retries and the per-account rate limit. No frontend composer, editing, vote, report, or moderation endpoint is included in this implementation.
 
 ### Edit and remove
 

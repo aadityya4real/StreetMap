@@ -23,7 +23,7 @@ func TestHealthReturnsJSONWithoutDatabaseDependency(t *testing.T) {
 	handler := NewHandler(pingerFunc(func(context.Context) error {
 		t.Fatal("health endpoint should not ping the database")
 		return nil
-	}), nil, testLogger(), time.Second)
+	}), nil, testLogger(), time.Second, nil, nil)
 	response := request(handler, http.MethodGet, "/api/v1/health")
 
 	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "application/json; charset=utf-8" {
@@ -39,7 +39,7 @@ func TestHealthReturnsJSONWithoutDatabaseDependency(t *testing.T) {
 }
 
 func TestReadyReturnsJSONWhenDatabaseIsAvailable(t *testing.T) {
-	handler := NewHandler(pingerFunc(func(context.Context) error { return nil }), nil, testLogger(), time.Second)
+	handler := NewHandler(pingerFunc(func(context.Context) error { return nil }), nil, testLogger(), time.Second, nil, nil)
 	response := request(handler, http.MethodGet, "/api/v1/ready")
 
 	if response.Code != http.StatusOK {
@@ -62,7 +62,7 @@ func TestReadyReturnsJSONWhenDatabaseIsAvailable(t *testing.T) {
 func TestReadyReturnsSafeUnavailableResponseWhenDatabaseIsDown(t *testing.T) {
 	handler := NewHandler(pingerFunc(func(context.Context) error {
 		return errors.New("password=must-not-appear")
-	}), nil, testLogger(), time.Second)
+	}), nil, testLogger(), time.Second, nil, nil)
 	response := request(handler, http.MethodGet, "/api/v1/ready")
 
 	if response.Code != http.StatusServiceUnavailable {
@@ -85,7 +85,7 @@ func TestReadyReturnsSafeUnavailableResponseWhenDatabaseIsDown(t *testing.T) {
 }
 
 func TestUnknownRouteAndMethodUseJSONErrors(t *testing.T) {
-	handler := NewHandler(pingerFunc(func(context.Context) error { return nil }), nil, testLogger(), time.Second)
+	handler := NewHandler(pingerFunc(func(context.Context) error { return nil }), nil, testLogger(), time.Second, nil, nil)
 	for _, tt := range []struct {
 		method string
 		path   string
@@ -110,7 +110,7 @@ func TestReadinessUsesBoundedRequestContext(t *testing.T) {
 	handler := NewHandler(pingerFunc(func(ctx context.Context) error {
 		_, deadlinePresent = ctx.Deadline()
 		return nil
-	}), nil, testLogger(), 25*time.Millisecond)
+	}), nil, testLogger(), 25*time.Millisecond, nil, nil)
 	response := request(handler, http.MethodGet, "/api/v1/ready")
 	if !deadlinePresent || response.Code != http.StatusOK {
 		t.Fatalf("readiness did not ping with bounded context: status=%d", response.Code)

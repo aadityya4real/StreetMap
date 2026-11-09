@@ -1,6 +1,6 @@
 # StreetMap backend foundation
 
-This is an independent Go module for StreetMap's shared API. It does not change or connect the WXT extension. The backend provides health/readiness checks and a public read-only notes discovery endpoint over PostgreSQL/PostGIS. Authentication, individual note detail, mutations, voting, reporting, and moderation remain future work.
+This is an independent Go module for StreetMap's shared API. It does not connect the WXT extension yet. The backend provides health/readiness checks, anonymous public note discovery, and an authenticated immediate-publication note-creation foundation over PostgreSQL/PostGIS. Note detail, editing, voting, reporting, and moderation remain future work.
 
 ## Prerequisites
 
@@ -65,6 +65,8 @@ Configuration is read from environment variables:
 | `HTTP_IDLE_TIMEOUT` | `60s` | HTTP keep-alive idle limit |
 | `READINESS_TIMEOUT` | `2s` | Database readiness ping limit |
 | `SHUTDOWN_TIMEOUT` | `10s` | Graceful shutdown limit |
+| `NOTE_CREATION_MAX_PER_WINDOW` | `3` | Maximum new notes per authenticated account in the configured window (maximum 100) |
+| `NOTE_CREATION_WINDOW` | `1h` | Note-creation rate-limit window, from `1m` through `24h` |
 | `SUPABASE_PROJECT_URL` | unset | Optional Supabase project HTTPS origin; enables backend token validation when all required auth settings are present |
 | `SUPABASE_ISSUER` | unset | Exact project issuer, expected to be the project origin followed by `/auth/v1` |
 | `SUPABASE_AUDIENCE` | unset | One exact audience value confirmed from the eventual project access tokens; no production value is assumed |
@@ -78,12 +80,13 @@ When enabled, the backend fetches keys only from the configured project's fixed 
 
 ## Database design
 
-The migrations enable PostGIS and create these tables:
+The migrations enable PostGIS and create these tables. Migration `00004_note_creation.sql` expands note categories and adds the idempotency ledger; it does not change existing notes or the status constraint.
 
 - `users`: nullable email with a unique normalized-email index for non-null values, display name, status, timestamps; no password or credential fields. User rows are retained and account status supports future deactivation.
 - `auth_identities` (migration `00003`): external issuer and subject mapped to an internal `users.id`, unique by `(issuer, subject)`. It supports multiple provider identities per StreetMap user and deliberately contains no provider-specific columns or email mapping. Existing users, including seeded demo users, are not linked automatically.
 - `locations`: typed as verified place, unverified place reference, broad area, or coordinate-only. Provider and provider place ID are separate fields and allowed only for verified places. URL-derived place labels and map-center coordinates do not imply venue identity. Coordinates use PostGIS `geography(Point, 4326)` (WGS 84); unverified place and broad-area records cannot carry a point, and coordinate-only records must carry one.
 - `notes`: required author and location references, title/body/category/status, and timestamps. Foreign keys restrict deletion to preserve attribution and moderation history.
+- `note_creation_requests`: unique per authenticated internal user and idempotency UUID; stores a SHA-256 hash of normalized request data and the successfully created note ID. The database record is retained for the lifetime of the note so retries remain safe. Migration rollback refuses if a note uses `road_condition`, `safety`, or `other` and removes the ledger only when rollback is safe.
 - `votes`: one row per `(note_id, user_id)` using a primary-key uniqueness constraint, so a user can have at most one active vote on a note.
 - `reports`: reporter, note, reason, status, and creation time. A partial unique index prevents duplicate open/reviewing reports by one user for one note while allowing a new report after resolution or dismissal.
 
@@ -100,6 +103,12 @@ Partial indexes support published notes by exact location, author, and category;
 - `context_type=coordinate&latitude=<lat>&longitude=<lon>`: exact equality against persisted user-confirmed `coordinate_only` locations; no proximity fallback.
 
 `limit` defaults to 20 and must be 1–50. Pagination uses validated context-bound keyset cursors. Requests with invalid or repeated parameters return `400 validation_error`; unknown verified location contexts return a generic `404`; database failures return a safe `500`. Public projections contain no emails, account state, or report details. See [`docs/architecture/api-contract.md`](../docs/architecture/api-contract.md) for the response contract and matching constraints.
+
+## Authenticated note creation foundation
+
+`POST /api/v1/notes` uses the existing Supabase JWT verification and identity-resolution middleware. The author is exclusively the internal user ID in the authenticated request principal. Public `GET /api/v1/notes` remains anonymous. Successful new notes are explicitly stored as `published` and appear immediately through the existing public discovery query; no pending/rejected moderation states are introduced.
+
+Each request requires an `Idempotency-Key` UUID. A retry with the same authenticated user, key, and normalized payload returns the original note; reusing the key with a different payload returns `409`. The write transaction locks the user's row, checks account status and idempotency, enforces the configured per-user rate limit, stores the location and note, and writes the ledger atomically. Exact verified locations must already exist in StreetMap. Unverified URL labels, broad labels, and user-confirmed coordinates remain separate persisted location types. Coordinate submissions require `user_confirmed: true`; a Google Maps viewport center is not implicitly accepted as a selected location. Strict JSON decoding rejects extra fields and all client-supplied author, status, vote, or verification fields.
 
 ## Local development seed data
 
@@ -153,4 +162,4 @@ Then set `STREETMAP_TEST_DATABASE_URL` to the same local connection URL with dat
 
 ## Current boundaries
 
-The backend now has a JWT verification, identity-resolution, and middleware foundation for future protected handlers. No Supabase project or Google OAuth configuration exists, so real provider tokens have not been verified. There is no login/OAuth flow, website or extension session, token refresh, logout, authenticated route, or contribution endpoint. Migration `00003` prepares `auth_identities`; a first authenticated request would provision only an unlinked local user for its validated `(issuer, subject)`. Email is nullable and remains unique when non-null, but provider email is not synchronized. Note creation, voting, reporting, and moderation remain absent. Public note reading remains anonymous. Do not expose write routes until client authentication, pending review state, and contribution authorization are implemented and verified.
+The backend has Supabase JWT verification, identity resolution, and an authenticated note-creation route. This change does not establish whether production provider settings or tokens have been verified; the extension's public-notes client is not connected to POST yet. The first authenticated request provisions only an unlinked local user for its validated `(issuer, subject)`. Email is nullable and remains unique when non-null, but provider email is not synchronized. Note creation is immediately public by the finalized product decision. Voting, reporting, editing, and moderation remain absent. Public note reading remains anonymous. The current frontend response validator still knows only the original five categories; it must be updated before newly created `road_condition`, `safety`, or `other` notes can be rendered there. If authentication config is absent, public reads still work and protected writes fail closed with `503 authentication_unavailable`.

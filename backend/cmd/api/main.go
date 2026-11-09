@@ -58,10 +58,17 @@ func run() error {
 		}
 		authenticator = auth.NewService(verifier, identity.NewPostgresResolver(db))
 	}
+	noteCreator, err := notes.NewPostgresCreator(db, notes.CreationPolicy{
+		MaxPerWindow: cfg.NoteCreationMaxPerWindow,
+		Window:       cfg.NoteCreationWindow,
+	})
+	if err != nil {
+		return fmt.Errorf("configure note creation policy: %w", err)
+	}
 
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.NewHandler(db, notes.NewPostgresReader(db), logger, cfg.ReadinessTimeout, authenticator),
+		Handler:           httpapi.NewHandler(db, notes.NewPostgresReader(db), logger, cfg.ReadinessTimeout, authenticator, noteCreator),
 		ReadHeaderTimeout: cfg.HTTPReadHeaderTimeout,
 		ReadTimeout:       cfg.HTTPReadTimeout,
 		WriteTimeout:      cfg.HTTPWriteTimeout,

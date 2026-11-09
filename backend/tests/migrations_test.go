@@ -3,9 +3,7 @@ package tests
 import (
 	"context"
 	"database/sql"
-	"net/url"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -19,12 +17,8 @@ func TestMigrationsApplyToDedicatedPostgresDatabase(t *testing.T) {
 	if dsn == "" {
 		t.Skip("set STREETMAP_TEST_DATABASE_URL to run PostgreSQL migration integration test")
 	}
-	parsed, err := url.Parse(dsn)
-	if err != nil {
-		t.Fatal("STREETMAP_TEST_DATABASE_URL must be a valid PostgreSQL URL")
-	}
-	if !strings.HasSuffix(strings.Trim(parsed.Path, "/"), "_test") {
-		t.Fatal("STREETMAP_TEST_DATABASE_URL must point to a dedicated database whose name ends in _test")
+	if err := validateTestDatabaseURL(dsn); err != nil {
+		t.Fatal("STREETMAP_TEST_DATABASE_URL must use loopback and target streetmap_test")
 	}
 
 	db, err := sql.Open("pgx", dsn)
@@ -47,7 +41,7 @@ func TestMigrationsApplyToDedicatedPostgresDatabase(t *testing.T) {
 		t.Fatalf("apply migrations: %v", err)
 	}
 
-	for _, table := range []string{"users", "locations", "notes", "votes", "reports"} {
+	for _, table := range []string{"users", "locations", "notes", "votes", "reports", "auth_identities", "note_creation_requests"} {
 		var exists bool
 		if err := db.QueryRowContext(ctx, `SELECT to_regclass('public.' || $1) IS NOT NULL`, table).Scan(&exists); err != nil {
 			t.Fatalf("check table %s: %v", table, err)

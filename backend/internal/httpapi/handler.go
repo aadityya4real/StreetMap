@@ -21,6 +21,7 @@ type Authenticator interface {
 type Handler struct {
 	database         Pinger
 	noteReader       notes.Reader
+	noteCreator      notes.Creator
 	logger           *slog.Logger
 	readinessTimeout time.Duration
 	authenticator    Authenticator
@@ -35,25 +36,21 @@ type readinessData struct {
 	Dependencies map[string]string `json:"dependencies"`
 }
 
-func NewHandler(database Pinger, noteReader notes.Reader, logger *slog.Logger, readinessTimeout time.Duration, authenticators ...Authenticator) http.Handler {
+func NewHandler(database Pinger, noteReader notes.Reader, logger *slog.Logger, readinessTimeout time.Duration, authenticator Authenticator, noteCreator notes.Creator) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	var authenticator Authenticator
-	if len(authenticators) > 0 {
-		authenticator = authenticators[0]
-	}
-	handler := Handler{database: database, noteReader: noteReader, logger: logger, readinessTimeout: readinessTimeout, authenticator: authenticator}
+	handler := Handler{database: database, noteReader: noteReader, noteCreator: noteCreator, logger: logger, readinessTimeout: readinessTimeout, authenticator: authenticator}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/health", handler.health)
 	mux.HandleFunc("/api/v1/ready", handler.ready)
-	mux.HandleFunc("/api/v1/notes", handler.listNotes)
+	mux.HandleFunc("/api/v1/notes", handler.notesCollection)
 	mux.HandleFunc("/", handler.notFound)
 	return requestLogger(logger, mux)
 }
 
-// Authenticated wraps a future protected handler with the configured bearer-token
-// authentication service. Current public routes deliberately do not use it.
+// Authenticated wraps a protected handler with the configured bearer-token
+// authentication service. Public GET routes deliberately do not use it.
 func (h Handler) Authenticated(next http.Handler) http.Handler {
 	return RequireAuthentication(h.authenticator, h.logger, next)
 }
@@ -93,6 +90,18 @@ func (h Handler) ready(w http.ResponseWriter, r *http.Request) {
 func (h Handler) methodNotAllowed(w http.ResponseWriter) {
 	w.Header().Set("Allow", http.MethodGet)
 	writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Only GET is supported.", h.logger)
+}
+
+func (h Handler) notesCollection(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		h.listNotes(w, r)
+	case http.MethodPost:
+		h.Authenticated(http.HandlerFunc(h.createNote)).ServeHTTP(w, r)
+	default:
+		w.Header().Set("Allow", "GET, POST")
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Only GET and POST are supported.", h.logger)
+	}
 }
 
 func (h Handler) notFound(w http.ResponseWriter, _ *http.Request) {

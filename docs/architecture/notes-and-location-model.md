@@ -1,6 +1,6 @@
 # Notes, location context, and moderation model
 
-**Status:** behavior aligned to the existing persisted model and the public read implementation. Migration `00002` adds a normalized location-label lookup index. Migration `00003` adds external identity mapping and makes `users.email` nullable without changing existing records or ownership relationships.
+**Status:** behavior aligned to the persisted model, public read API, and authenticated note-creation foundation. Migration `00002` adds a normalized location-label lookup index; `00003` adds external identity mapping; `00004` adds note categories and a per-user idempotency ledger without changing existing note records or ownership relationships.
 
 ## Existing persisted model
 
@@ -11,11 +11,12 @@
 | `users` | UUID; nullable email with a unique generated normalized-email index for non-null values; display name 1–80 chars; status `active`, `suspended`, `deleted`; no credentials. |
 | `auth_identities` | UUID; required `user_id` FK to `users` with `ON DELETE RESTRICT`; required issuer and subject; unique `(issuer, subject)`; creation timestamp and index by user. Multiple identities may map to one internal StreetMap user. |
 | `locations` | UUID; types `verified_place`, `unverified_place_reference`, `broad_area`, `coordinate_only`; label 1–200; optional PostGIS `geography(Point,4326)`; provider and provider-place ID must be paired and are allowed only for `verified_place`; coordinate-only requires a point, while unverified and broad types cannot carry coordinates. Provider/place ID is unique; coordinate GiST and `(location_type, lower(btrim(display_label)))` lookup indexes exist after migration 00002. |
-| `notes` | UUID; required author and location FKs with `ON DELETE RESTRICT`; title 3–120; body 1–5000; categories `hidden_gem`, `shortcut`, `local_tip`, `parking`, `warning`; status defaults to `published` and allows only `published`, `hidden`, `removed`; created/updated timestamps and update trigger. |
+| `notes` | UUID; required author and location FKs with `ON DELETE RESTRICT`; title 3–120; body 1–5000; categories `hidden_gem`, `shortcut`, `local_tip`, `parking`, `warning`, `road_condition`, `safety`, `other`; status defaults to `published` and allows only `published`, `hidden`, `removed`; created/updated timestamps and update trigger. |
+| `note_creation_requests` | Migration `00004`; `(user_id, idempotency_key)` is unique, request hash is exactly 32 bytes, and each successful key points to one note. Foreign keys restrict deletion. The record binds retries to an internal user and normalized payload. |
 | `votes` | One `helpful` row per `(note_id,user_id)` via primary key; FKs restrict deletion. |
 | `reports` | Reason 1–1000; statuses `open`, `reviewing`, `resolved`, `dismissed`, `actioned`; unique active report per reporter/note while open or reviewing; note/status index. |
 
-The Go API now exposes public `GET /api/v1/notes` discovery; note detail, auth, vote, report, mutation, and moderation routes are still absent. The extension does not call this API and uses separate demo notes. Its public-URL parser distinguishes `broad-area`, `place-page-unverified`, `map-center`, `unverified-place-reference`, `maps-no-location`, and `maps-unavailable` plus errors. It reads the URL only; do not expand it into DOM scraping or undocumented Maps state.
+The Go API exposes anonymous `GET /api/v1/notes` and authenticated `POST /api/v1/notes`. POST uses the validated internal identity from the bearer-authentication middleware and immediately publishes. Note detail, edit, vote, report, and moderation routes are absent. The extension has an anonymous public-notes client but is not connected to POST. Its current category validator accepts the original five categories only; the frontend must add `road_condition`, `safety`, and `other` before it can render pages containing those contributions. Its public-URL parser distinguishes `broad-area`, `place-page-unverified`, `map-center`, `unverified-place-reference`, `maps-no-location`, and `maps-unavailable` plus errors. It reads the URL only; do not expand it into DOM scraping or undocumented Maps state.
 
 ## Location evidence and query policy
 
@@ -42,32 +43,25 @@ The API accepts one label selector per request and may pair a broad or unverifie
 - Candidate nearby notes must themselves have persisted points. Ignore missing points; return zero nearby results if query origin or candidates lack coordinates. The current API uses a three-second query context, deterministic keyset pagination, and a maximum of 20 supplemental nearby notes for sparse exact-location results. Map-center requests return nearby results only and are page-bounded by `limit`.
 - Future ranking may use a quality score with vote volume and recency smoothing; the current public API uses deterministic newest-first ordering within exact/context groups and distance-first ordering for nearby results. Do not let raw vote count alone determine rank. Exclude self-votes in transaction and in any score. Distance is a separate relevance signal; do not label proximity as relevance to a business.
 
-## Note lifecycle and moderation
+## Note creation and lifecycle
 
-The current database allows immediate `published` status and lacks pending/rejected states and an audit log. Recommended public submission policy is review-before-publication:
+The current product decision is immediate publication. An authenticated POST transaction writes `status='published'`; no `pending` or `rejected` state is introduced. Public GET can therefore return a successfully created note immediately. This milestone adds eight allowed categories and does not change the status constraint or public ranking/grouping.
 
-```text
-pending -> published
-pending -> rejected
-published -> hidden -> published (moderator restore)
-published -> hidden -> removed (moderator removal)
-published -> pending (meaningful author edit; policy decision)
-published -> removed (author soft-delete)
-```
+Every creation request requires an `Idempotency-Key` UUID. The database binds `(authenticated internal user ID, key)` to the SHA-256 hash of the normalized request and resulting note. A same-key/same-payload retry returns the original note; same-key/different-payload returns conflict. Idempotency records remain with the note to preserve retry safety. A database-serialized per-user rate limit defaults to 3 creations per hour and is configurable; completed idempotent retries do not consume another slot.
 
-Use server-side authorization for every transition. Authors may edit or soft-remove only their own eligible notes. Moderators require a separately defined role/capability and every moderation action records actor, note, previous/new state, reason, and timestamp. Public queries expose only `published`; return a generic 404 for non-public notes. A report is a review signal, not automatic proof or an automatic removal threshold. Allow one active report per reporter/note, matching the existing partial unique index; resolve/dismiss/action reports with an auditable moderator event. Never expose reporter identity or report body publicly.
+The writer rechecks active account status while holding a row lock in the creation transaction. It obtains author identity only from the validated request principal, never the JSON body. Verified locations must already exist as `verified_place`; unverified and broad labels persist as their separate location kinds with no coordinates; coordinate-only locations require bounded coordinates and the explicit `user_confirmed: true` request field. Map-center coordinates are never treated as selected-place coordinates.
 
-Fields and validation should stay aligned with the SQL limits and categories listed above. Store only needed public author `display_name`; never expose email. Add a server-enforced idempotency key for note creation to reduce duplicate retry submissions, with bounded retention and key/payload binding. Detect likely spam/duplicates with rate limits, normalized similarity/location review queues, and moderation; do not make a fuzzy deduper silently merge content. Do not accept client-specified votes, status, author, moderation outcome, verification flags, or vote counts.
+No editing or moderation transitions are implemented. Existing statuses remain `published`, `hidden`, and `removed`. Any future moderation must have a separate approved product design and authorization model. A report remains a review signal, not automatic proof or an automatic removal threshold. Do not accept client-specified votes, status, author, moderation outcome, verification flags, or vote counts.
 
 Votes remain one helpful vote per user per note, enforced by the composite PK. Repeated `PUT` is idempotent; removing a vote affects only the caller. Prevent authors voting on their own notes in an atomic transaction. Votes on hidden/removed notes should be rejected or hidden and excluded from public counts per implementation policy.
 
 ## Remaining schema and behavior gaps
 
-1. **Authentication:** migration `00003` adds `auth_identities(issuer, subject, user_id, ...)`, unique on issuer+subject. This table is only a schema foundation: no authentication, user provisioning, identity linking, JWT validation, or session handling is implemented. Add session/grant records only if the website BFF needs local revocation. Email is nullable profile/contact data and is never an identity key.
+1. **Website sessions:** Supabase identity mapping and Go JWT authentication are implemented. The future website BFF may need server-managed session/revocation records; none are added here. Email remains nullable and is not an identity key.
 2. **Place reference identity:** `locations_verified_provider` requires provider and provider_place_id iff type is verified, so an unverified external place reference cannot currently persist its external provider ID. Add a separate source/reference table or fields with type-appropriate constraints; do not weaken verification semantics accidentally.
-3. **Review lifecycle:** add `pending`/`rejected` (and possibly explicit `deleted_at`) with a safe default before enabling note submission. Existing partial indexes only include published notes. Add moderation events/audit records before moderators act.
+3. **Moderation lifecycle:** immediate publication is the current product decision. If moderation tools or delayed publication are later requested, design their states, audit events, authorization, and user messaging separately; this milestone intentionally adds no pending/rejected states.
 4. **Account removal and retention:** `users.email` is nullable and remains unique when non-null; notes/votes/reports and auth identity FKs use `RESTRICT`. Physical user deletion conflicts with preserving attribution. Decide whether to deactivate and pseudonymize, retain a tombstone, or anonymize via a schema change while satisfying privacy/retention rules. Revoke identity grants/sessions regardless.
-5. **Edits and public counts:** there is no edit history, moderation actor, vote aggregate, or transactional idempotency ledger. Add only what implementation requirements need; never make user-provided counters authoritative.
+5. **Edits and public counts:** there is no edit history or moderation actor. The creation idempotency ledger is transactional; votes and reports have no new endpoints. Never make user-provided counters authoritative.
 6. **Spatial model:** broad areas currently have only a display label; no polygon or administrative-area identifier exists. Do not fabricate a point/centroid. If polygon search is needed, define its source/licensing and geometry model separately.
 7. **Integrity policy:** add checks/transactions for self-vote, eligible vote/report note status, and any title/body edit review policy. Database constraints should support invariants that must survive concurrent requests.
 

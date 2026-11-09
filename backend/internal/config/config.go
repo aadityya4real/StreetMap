@@ -15,20 +15,22 @@ import (
 )
 
 type Config struct {
-	DatabaseURL           string
-	HTTPAddr              string
-	LogLevel              string
-	DBMaxOpenConns        int
-	DBMaxIdleConns        int
-	DBConnMaxLifetime     time.Duration
-	DBConnMaxIdleTime     time.Duration
-	HTTPReadHeaderTimeout time.Duration
-	HTTPReadTimeout       time.Duration
-	HTTPWriteTimeout      time.Duration
-	HTTPIdleTimeout       time.Duration
-	ReadinessTimeout      time.Duration
-	ShutdownTimeout       time.Duration
-	Auth                  AuthConfig
+	DatabaseURL              string
+	HTTPAddr                 string
+	LogLevel                 string
+	DBMaxOpenConns           int
+	DBMaxIdleConns           int
+	DBConnMaxLifetime        time.Duration
+	DBConnMaxIdleTime        time.Duration
+	HTTPReadHeaderTimeout    time.Duration
+	HTTPReadTimeout          time.Duration
+	HTTPWriteTimeout         time.Duration
+	HTTPIdleTimeout          time.Duration
+	ReadinessTimeout         time.Duration
+	ShutdownTimeout          time.Duration
+	NoteCreationMaxPerWindow int
+	NoteCreationWindow       time.Duration
+	Auth                     AuthConfig
 }
 
 type AuthConfig struct {
@@ -128,6 +130,18 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 		if err != nil {
 			return Config{}, err
 		}
+	}
+	if cfg.NoteCreationMaxPerWindow, err = intValue(lookup, "NOTE_CREATION_MAX_PER_WINDOW", 3, 1); err != nil {
+		return Config{}, err
+	}
+	if cfg.NoteCreationMaxPerWindow > 100 {
+		return Config{}, fmt.Errorf("NOTE_CREATION_MAX_PER_WINDOW must not exceed 100")
+	}
+	if cfg.NoteCreationWindow, err = durationValue(lookup, "NOTE_CREATION_WINDOW", time.Hour); err != nil {
+		return Config{}, err
+	}
+	if cfg.NoteCreationWindow < time.Minute || cfg.NoteCreationWindow > 24*time.Hour {
+		return Config{}, fmt.Errorf("NOTE_CREATION_WINDOW must be between 1m and 24h")
 	}
 	if cfg.Auth, err = authConfig(lookup); err != nil {
 		return Config{}, err

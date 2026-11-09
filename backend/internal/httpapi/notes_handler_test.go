@@ -180,8 +180,8 @@ func TestListNotesHandlesMissingLocationContextAndUnsupportedMethod(t *testing.T
 	if missing.Code != http.StatusNotFound || !strings.Contains(missing.Body.String(), `"code":"not_found"`) {
 		t.Fatalf("unexpected missing-context response: %d %s", missing.Code, missing.Body.String())
 	}
-	method := request(handler, http.MethodPost, "/api/v1/notes")
-	if method.Code != http.StatusMethodNotAllowed || method.Header().Get("Allow") != http.MethodGet {
+	method := request(handler, http.MethodPut, "/api/v1/notes")
+	if method.Code != http.StatusMethodNotAllowed || method.Header().Get("Allow") != "GET, POST" {
 		t.Fatalf("unexpected method response: %d headers=%v", method.Code, method.Header())
 	}
 }
@@ -281,7 +281,7 @@ func TestListNotesDoesNotExposeStorageErrors(t *testing.T) {
 }
 
 func notesHandler(reader notes.Reader) http.Handler {
-	return NewHandler(pingerFunc(func(context.Context) error { return nil }), reader, slog.New(slog.NewJSONHandler(io.Discard, nil)), time.Second)
+	return NewHandler(pingerFunc(func(context.Context) error { return nil }), reader, slog.New(slog.NewJSONHandler(io.Discard, nil)), time.Second, nil, nil)
 }
 
 func emptyNotesPage() notes.Page {
