@@ -124,45 +124,89 @@ func TestSeedIsIdempotentAndCoversPublicNotesContexts(t *testing.T) {
 	})
 
 	t.Run("map center supplies only nearby notes within five kilometres", func(t *testing.T) {
-		page, err := reader.ListPublicNotes(ctx, notes.Query{Context: notes.Context{Type: notes.ContextMapCenter, Latitude: 0, Longitude: 0, RadiusM: 5000}, Limit: 50})
-		if err != nil {
-			t.Fatal(err)
+		const limit = 50
+		query := notes.Query{Context: notes.Context{Type: notes.ContextMapCenter, Latitude: 0, Longitude: 0, RadiusM: 5000}, Limit: limit}
+		seedNoteIDs := make(map[string]string)
+		for _, item := range seedNotes {
+			if item.LocationID == seedLocations[0].ID || item.LocationID == seedLocations[1].ID || item.LocationID == seedLocations[2].ID {
+				seedNoteIDs[item.ID] = item.LocationID
+			}
 		}
-		if len(page.Exact) != 0 || len(page.ContextMatches) != 0 || len(page.Nearby) != 50 || !page.HasMore || page.NextCursor == nil {
-			t.Fatalf("unexpected map-center groups: exact=%d context=%d nearby=%d", len(page.Exact), len(page.ContextMatches), len(page.Nearby))
-		}
+		seenSeedNotes := make(map[string]bool, len(seedNoteIDs))
+		seenPageIDs := make(map[string]bool)
 		var sawNear, sawFar bool
-		for _, item := range page.Nearby {
-			if item.MatchType != notes.MatchNearby || item.DistanceM == nil || *item.DistanceM > 5000 {
-				t.Fatalf("map-center result is not correctly marked nearby: %+v", item)
+		previousRank := 0
+		pageNumber := 0
+		for {
+			page, err := reader.ListPublicNotes(ctx, query)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if item.LocationLabel == seedLocations[1].Label && *item.DistanceM > 1000 {
-				sawNear = true
+			pageNumber++
+			if len(page.Exact) != 0 || len(page.ContextMatches) != 0 {
+				t.Fatalf("map-center context returned non-nearby groups on page %d: %+v", pageNumber, page)
 			}
-			if item.LocationLabel == seedLocations[3].Label {
-				t.Fatalf("out-of-radius note was returned: %+v", item)
+			if page.HasMore != (page.NextCursor != nil) {
+				t.Fatalf("map-center cursor state is inconsistent on page %d: hasMore=%t cursor=%+v", pageNumber, page.HasMore, page.NextCursor)
 			}
+			if page.HasMore && len(page.Nearby) == 0 {
+				t.Fatalf("map-center returned an empty page with a continuation cursor on page %d", pageNumber)
+			}
+			for _, item := range page.Nearby {
+				if item.MatchType != notes.MatchNearby || item.DistanceM == nil || *item.DistanceM > 5000 {
+					t.Fatalf("map-center result is not correctly marked nearby or exceeds the radius: %+v", item)
+				}
+				if item.NearbyRank < previousRank {
+					t.Fatalf("nearby diversity rank moved backwards from %d to %d", previousRank, item.NearbyRank)
+				}
+				previousRank = item.NearbyRank
+				if item.LocationLabel == seedLocations[1].Label && *item.DistanceM > 1000 {
+					sawNear = true
+				}
+				if item.LocationLabel == seedLocations[3].Label {
+					t.Fatalf("out-of-radius note was returned: %+v", item)
+				}
+				if seenPageIDs[item.ID] {
+					t.Fatalf("nearby pagination repeated note %s", item.ID)
+				}
+				seenPageIDs[item.ID] = true
+				if locationID, isSeedNote := seedNoteIDs[item.ID]; isSeedNote {
+					if seenSeedNotes[item.ID] {
+						t.Fatalf("nearby pagination repeated seeded note %s", item.ID)
+					}
+					seenSeedNotes[item.ID] = true
+					if locationID == seedLocations[2].ID {
+						if item.NearbyRank != 1 || item.LocationLabel != seedLocations[2].Label || *item.DistanceM <= 3500 {
+							t.Fatalf("farther in-radius source did not appear in its first diversity round: %+v", item)
+						}
+						sawFar = true
+					}
+				}
+			}
+			if page.HasMore {
+				last := page.Nearby[len(page.Nearby)-1]
+				if page.NextCursor.Phase != notes.PhaseNearby || page.NextCursor.NearbyRank != last.NearbyRank || page.NextCursor.NoteID != last.ID || page.NextCursor.CreatedAt != last.CreatedAt || page.NextCursor.DistanceM != *last.DistanceM {
+					t.Fatalf("nearby cursor does not resume after the last result on page %d: cursor=%+v last=%+v", pageNumber, page.NextCursor, last)
+				}
+				query.Cursor = page.NextCursor
+				continue
+			}
+			break
 		}
 		if !sawNear {
-			t.Fatalf("expected nearer location with a distinct distance, sawNear=%t", sawNear)
-		}
-		nextPage, err := reader.ListPublicNotes(ctx, notes.Query{Context: notes.Context{Type: notes.ContextMapCenter, Latitude: 0, Longitude: 0, RadiusM: 5000}, Limit: 50, Cursor: page.NextCursor})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(nextPage.Nearby) < 4 {
-			t.Fatalf("map-center second page did not contain the remaining seeded notes: %+v", nextPage)
-		}
-		for _, item := range nextPage.Nearby {
-			if item.LocationLabel == seedLocations[2].Label && item.DistanceM != nil && *item.DistanceM > 3500 {
-				sawFar = true
-			}
-			if item.LocationLabel == seedLocations[3].Label {
-				t.Fatalf("out-of-radius note was returned on the next page: %+v", item)
-			}
+			t.Fatal("expected nearer location with a distinct distance")
 		}
 		if !sawFar {
-			t.Fatal("expected the farther in-radius source on the next page")
+			t.Fatal("expected farther in-radius source in the first diversity round, regardless of which page contains it")
+		}
+		if len(seenSeedNotes) != len(seedNoteIDs) {
+			missing := make([]string, 0)
+			for id := range seedNoteIDs {
+				if !seenSeedNotes[id] {
+					missing = append(missing, id)
+				}
+			}
+			t.Fatalf("nearby pagination did not return every in-radius seeded note exactly once: got=%d want=%d missing=%v", len(seenSeedNotes), len(seedNoteIDs), missing)
 		}
 	})
 

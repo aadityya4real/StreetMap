@@ -4,9 +4,27 @@ export const NOTE_CATEGORIES = [
   'local_tip',
   'parking',
   'warning',
+  'road_condition',
+  'safety',
+  'other',
 ] as const;
 
 export type NoteCategory = (typeof NOTE_CATEGORIES)[number];
+
+export const NOTE_CATEGORY_LABELS: Record<NoteCategory, string> = {
+  hidden_gem: 'Hidden Gem',
+  shortcut: 'Shortcut',
+  local_tip: 'Local Tip',
+  parking: 'Parking',
+  warning: 'Warning',
+  road_condition: 'Road Condition',
+  safety: 'Safety',
+  other: 'Other',
+};
+
+export function isNoteCategory(value: unknown): value is NoteCategory {
+  return typeof value === 'string' && NOTE_CATEGORIES.includes(value as NoteCategory);
+}
 
 export type NoteMatchType =
   | 'exact_location'

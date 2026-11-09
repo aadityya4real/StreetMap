@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { DisplayNote } from '../types/note';
+import { NOTE_CATEGORY_LABELS, type DisplayNote } from '../types/note';
 
 interface NoteCardProps {
   note: DisplayNote;
@@ -25,7 +25,7 @@ export default function NoteCard({ note }: NoteCardProps) {
       >
         <span className="note-meta">
           <span className={`category category-${note.category.replaceAll('_', '-')}`}>
-            {note.category.replaceAll('_', ' ').toUpperCase()}
+            {NOTE_CATEGORY_LABELS[note.category].toUpperCase()}
           </span>
           <time className="note-time" dateTime={note.created_at}>{formatCreatedAt(note.created_at)}</time>
         </span>

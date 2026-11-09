@@ -11,6 +11,7 @@ import {
   requestPublicNotes,
   NotesRequestError,
 } from '../src/popup/services/publicNotes.ts';
+import { isNoteCategory, NOTE_CATEGORIES, NOTE_CATEGORY_LABELS } from '../src/popup/types/note.ts';
 
 const broadContext = { type: 'broad_area', label: 'Greater Noida, Uttar Pradesh' };
 const placeContext = { type: 'place_page_unverified', label: 'GP Hotel & Banquet' };
@@ -113,6 +114,25 @@ test('rejects duplicate note IDs in a response page', () => {
   );
 });
 
+test('accepts every backend note category and rejects unknown categories safely', () => {
+  const categories = ['hidden_gem', 'shortcut', 'local_tip', 'parking', 'warning', 'road_condition', 'safety', 'other'];
+  assert.deepEqual(NOTE_CATEGORIES, categories);
+  for (const category of categories) {
+    assert.equal(isNoteCategory(category), true);
+    assert.equal(typeof NOTE_CATEGORY_LABELS[category], 'string');
+    const categoryNote = { ...note, category };
+    assert.equal(
+      parsePublicNotesResponse(envelope(placeContext, { context_matches: [categoryNote] }), placeContext).context_matches[0].category,
+      category,
+    );
+  }
+  assert.equal(isNoteCategory('future_unknown_category'), false);
+  assert.throws(
+    () => parsePublicNotesResponse(envelope(placeContext, { context_matches: [{ ...note, category: 'future_unknown_category' }] }), placeContext),
+    InvalidNotesResponseError,
+  );
+});
+
 test('only sends context the extension can establish and never reuses Maps place IDs', () => {
   assert.deepEqual(getNotesRequestContext({ status: 'broad-area', sourceHostname: 'www.google.com', source: 'search-query', label: broadContext.label }), broadContext);
   assert.deepEqual(getNotesRequestContext({ status: 'place-page-unverified', sourceHostname: 'www.google.com', label: placeContext.label }), placeContext);
@@ -172,6 +192,7 @@ test('fetches only the public notes route without credentials and validates its 
   assert.equal(requestedUrl.searchParams.get('context_type'), 'place_page_unverified');
   assert.equal(requestedUrl.searchParams.get('label'), 'GP Hotel & Banquet');
   assert.equal(requestOptions.credentials, 'omit');
+  assert.equal('Authorization' in requestOptions.headers, false);
   assert.equal(page.context_matches.length, 1);
 });
 

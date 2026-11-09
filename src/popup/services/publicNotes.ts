@@ -1,5 +1,5 @@
 import type { LocationContext } from '../../shared/locationContext';
-import { NOTE_CATEGORIES, type NoteCategory, type NoteGroup, type PublicNote, type PublicNotesPage } from '../types/note';
+import { isNoteCategory, type NoteCategory, type NoteGroup, type PublicNote, type PublicNotesPage } from '../types/note';
 
 const DEFAULT_DEVELOPMENT_API_BASE_URL = 'http://127.0.0.1:8080/api/v1';
 const NOTES_PAGE_SIZE = 50;
@@ -242,7 +242,7 @@ function parseNote(value: unknown, group: NoteGroup, expectedContext: NotesReque
     typeof id !== 'string' || !NOTE_ID_PATTERN.test(id) ||
     typeof title !== 'string' || title.length < 3 || title.length > 120 ||
     typeof body !== 'string' || body.length < 1 || body.length > 5000 ||
-    typeof category !== 'string' || !NOTE_CATEGORIES.includes(category as NoteCategory) ||
+    !isNoteCategory(category) ||
     typeof value.author.display_name !== 'string' || value.author.display_name.length < 1 || value.author.display_name.length > 100 ||
     typeof createdAt !== 'string' || !RFC3339_UTC_PATTERN.test(createdAt) || !Number.isFinite(Date.parse(createdAt)) ||
     typeof helpfulVoteCount !== 'number' || !Number.isSafeInteger(helpfulVoteCount) || helpfulVoteCount < 0 ||
