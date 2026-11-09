@@ -25,8 +25,7 @@ function actions(overrides = {}) {
   return {
     signInWithEmail: async () => 'authenticated',
     signUpWithEmail: async () => 'verification-pending',
-    verifySignupOtp: async () => undefined,
-    resendSignupOtp: async () => undefined,
+    resendSignupConfirmation: async () => undefined,
     signInWithGoogle: async () => undefined,
     signOut: async () => undefined,
     ...overrides,
@@ -84,7 +83,7 @@ async function openSignup(mounted, address = 'reader@example.test') {
   await submit(mounted.container);
 }
 
-test('signup requiring confirmation stays anonymous and opens a masked verification state', async () => {
+test('signup requiring confirmation shows link instructions without claiming an authenticated session', async () => {
   let closed = false;
   const panelActions = actions({ async signUpWithEmail(email) { assert.equal(email, 'reader@example.test'); return 'verification-pending'; } });
   const container = domDocument.createElement('div');
@@ -95,9 +94,12 @@ test('signup requiring confirmation stays anonymous and opens a masked verificat
   try {
     await openSignup(mounted);
     assert.match(container.textContent, /Check your email/);
-    assert.match(container.textContent, /verification code to r\*\*\*\*r@example\.test/i);
+    assert.match(container.textContent, /confirmation email to r\*\*\*\*r@example\.test/i);
+    assert.match(container.textContent, /click its link.*return to StreetMap and sign in/i);
     assert.doesNotMatch(container.textContent, /Signed in as/);
-    assert.equal(container.querySelector('#auth-verification-code')?.getAttribute('autocomplete'), 'one-time-code');
+    assert.equal(container.querySelector('#auth-verification-code'), null);
+    assert.equal(container.querySelector('input[autocomplete="one-time-code"]'), null);
+    assert.match(container.querySelector('.auth-secondary-button').textContent, /Resend email/);
     assert.match(container.querySelector('.auth-secondary-button').textContent, new RegExp(`${RESEND_COOLDOWN_SECONDS}s`));
     assert.equal(closed, false);
     assert.equal(maskEmail('reader@example.test'), 'r****r@example.test');
@@ -122,77 +124,17 @@ test('signup failure explains the built-in email recipient restriction and shows
     assert.match(mounted.container.querySelector('[role="alert"]').textContent, /built-in email service.*project organization/i);
     assert.match(mounted.container.querySelector('[role="alert"]').textContent, /email_address_not_authorized \(HTTP 403\)/);
     assert.equal(mounted.container.querySelector('#auth-verification-code'), null);
-    assert.doesNotMatch(mounted.container.textContent, /verification code to .*sent/i);
+    assert.doesNotMatch(mounted.container.textContent, /confirmation email sent/i);
   } finally {
     mounted.unmount();
   }
 });
 
-test('OTP entry rejects invalid input and successful verification shows the signed-in account', async () => {
-  let verified;
-  const mounted = mount(actions({ async verifySignupOtp(email, token) { verified = { email, token }; } }));
-  try {
-    await openSignup(mounted);
-    setInput(mounted.container, '#auth-verification-code', '12x');
-    assert.equal(mounted.container.querySelector('#auth-verification-code').value, '12');
-    setInput(mounted.container, '#auth-verification-code', '246810');
-    await submit(mounted.container);
-    assert.deepEqual(verified, { email: 'reader@example.test', token: '246810' });
-    assert.match(mounted.container.textContent, /Email verified/);
-    assert.match(mounted.container.textContent, /signed in as reader@example\.test/);
-  } finally {
-    mounted.unmount();
-  }
-});
-
-test('verification failures show a safe error and remain on the pending screen', async () => {
-  const mounted = mount(actions({ async verifySignupOtp() { throw new Error('private provider detail'); } }));
-  try {
-    await openSignup(mounted);
-    setInput(mounted.container, '#auth-verification-code', '246810');
-    await submit(mounted.container);
-    assert.match(mounted.container.textContent, /code could not be verified/i);
-    assert.doesNotMatch(mounted.container.textContent, /private provider detail/);
-    assert.ok(mounted.container.querySelector('#auth-verification-code'));
-  } finally {
-    mounted.unmount();
-  }
-});
-
-test('duplicate verification submissions issue one request while the first is pending', async () => {
-  let resolveVerification;
-  let verificationCalls = 0;
-  const mounted = mount(actions({
-    verifySignupOtp() {
-      verificationCalls += 1;
-      return new Promise((resolve) => { resolveVerification = resolve; });
-    },
-  }));
-  try {
-    await openSignup(mounted);
-    setInput(mounted.container, '#auth-verification-code', '246810');
-    const form = mounted.container.querySelector('form');
-    await act(async () => {
-      form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-      form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-      await immediate();
-    });
-    assert.equal(verificationCalls, 1);
-    await act(async () => {
-      resolveVerification();
-      await immediate();
-    });
-    assert.match(mounted.container.textContent, /Email verified/);
-  } finally {
-    mounted.unmount();
-  }
-});
-
-test('resend confirms success, masks account enumeration, and starts cooldown', async () => {
+test('confirmation resend succeeds, masks account enumeration, and starts cooldown', async () => {
   let resendCalls = 0;
   const mounted = mount(actions({
     async signInWithEmail() { return 'email-unverified'; },
-    async resendSignupOtp(email) { resendCalls += 1; assert.equal(email, 'reader@example.test'); },
+    async resendSignupConfirmation(email) { resendCalls += 1; assert.equal(email, 'reader@example.test'); },
   }));
   try {
     setInput(mounted.container, '#auth-email', 'reader@example.test');
@@ -201,21 +143,23 @@ test('resend confirms success, masks account enumeration, and starts cooldown', 
     const verificationResend = mounted.container.querySelector('.auth-secondary-button');
     await click(verificationResend);
     assert.equal(resendCalls, 1);
-    assert.match(mounted.container.textContent, /If a signup is pending.*code has been sent/i);
-    assert.match(mounted.container.querySelector('.auth-secondary-button').textContent, /Resend code in 30s/);
+    assert.match(mounted.container.textContent, /If a signup is pending.*confirmation email/i);
+    assert.match(mounted.container.querySelector('.auth-secondary-button').textContent, /Resend email in 30s/);
   } finally {
     mounted.unmount();
   }
 });
 
-test('unverified login offers OTP resend and back-to-login retains email', async () => {
+test('unverified login offers link resend and back-to-login retains email', async () => {
   const mounted = mount(actions({ async signInWithEmail() { return 'email-unverified'; } }));
   try {
     setInput(mounted.container, '#auth-email', 'reader@example.test');
     setInput(mounted.container, '#auth-password', 'synthetic-password');
     await submit(mounted.container);
     assert.match(mounted.container.textContent, /Email confirmation is still required/);
-    assert.ok(mounted.container.querySelector('#auth-verification-code'));
+    assert.match(mounted.container.textContent, /confirmation link/);
+    assert.match(mounted.container.textContent, /return to StreetMap and sign in/i);
+    assert.equal(mounted.container.querySelector('#auth-verification-code'), null);
     await click(mounted.container.querySelector('.auth-mode-toggle'));
     assert.equal(mounted.container.querySelector('#auth-email').value, 'reader@example.test');
   } finally {
@@ -226,16 +170,16 @@ test('unverified login offers OTP resend and back-to-login retains email', async
 test('resend failures never claim delivery and display rate-limit cooldown', async () => {
   const mounted = mount(actions({
     async signInWithEmail() { return 'email-unverified'; },
-    async resendSignupOtp() { throw new EmailAuthFailure('rate-limited', 'Too many verification requests. Please wait before requesting another code.'); },
+    async resendSignupConfirmation() { throw new EmailAuthFailure('rate-limited', 'Too many confirmation email requests. Please wait before requesting another email.'); },
   }));
   try {
     setInput(mounted.container, '#auth-email', 'reader@example.test');
     setInput(mounted.container, '#auth-password', 'synthetic-password');
     await submit(mounted.container);
     await click(mounted.container.querySelector('.auth-secondary-button'));
-    assert.match(mounted.container.querySelector('[role="alert"]').textContent, /Too many verification requests/);
-    assert.doesNotMatch(mounted.container.textContent, /new verification code has been sent/i);
-    assert.match(mounted.container.querySelector('.auth-secondary-button').textContent, /Resend code in 60s/);
+    assert.match(mounted.container.querySelector('[role="alert"]').textContent, /Too many confirmation email requests/);
+    assert.doesNotMatch(mounted.container.textContent, /confirmation email has been sent/i);
+    assert.match(mounted.container.querySelector('.auth-secondary-button').textContent, /Resend email in 60s/);
   } finally {
     mounted.unmount();
   }
@@ -246,7 +190,7 @@ test('duplicate resend requests are prevented while one is in flight', async () 
   let resendCalls = 0;
   const mounted = mount(actions({
     async signInWithEmail() { return 'email-unverified'; },
-    resendSignupOtp() {
+    resendSignupConfirmation() {
       resendCalls += 1;
       return new Promise((resolve) => { resolveResend = resolve; });
     },
@@ -262,11 +206,13 @@ test('duplicate resend requests are prevented while one is in flight', async () 
       await immediate();
     });
     assert.equal(resendCalls, 1);
+    assert.equal(button.disabled, true);
+    assert.match(button.textContent, /Sending/);
     await act(async () => {
       resolveResend();
       await immediate();
     });
-    assert.match(mounted.container.textContent, /code has been sent/i);
+    assert.match(mounted.container.textContent, /confirmation email/i);
   } finally {
     mounted.unmount();
   }

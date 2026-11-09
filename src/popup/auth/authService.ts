@@ -1,10 +1,9 @@
 import type { AuthChangeEvent, Session } from '@supabase/supabase-js';
 import {
-  resendSignupOtpUsing,
+  resendSignupConfirmationUsing,
   signInWithEmailUsing,
   signOutLocally,
   signUpWithEmailUsing,
-  verifySignupOtpUsing,
   type EmailSignInResult,
   type EmailSignUpResult,
 } from './emailPassword';
@@ -46,12 +45,8 @@ export async function signUpWithEmail(email: string, password: string): Promise<
   return signUpWithEmailUsing(await getSupabaseClient(), email, password);
 }
 
-export async function verifySignupOtp(email: string, token: string): Promise<void> {
-  return verifySignupOtpUsing(await getSupabaseClient(), email, token);
-}
-
-export async function resendSignupOtp(email: string): Promise<void> {
-  return resendSignupOtpUsing(await getSupabaseClient(), email);
+export async function resendSignupConfirmation(email: string): Promise<void> {
+  return resendSignupConfirmationUsing(await getSupabaseClient(), email);
 }
 
 export async function signOut(): Promise<void> {

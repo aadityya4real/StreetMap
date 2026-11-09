@@ -1,11 +1,10 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import {
-  resendSignupOtp,
+  resendSignupConfirmation,
   signInWithEmail,
   signInWithGoogle,
   signOut,
   signUpWithEmail,
-  verifySignupOtp,
 } from '../auth/authService';
 import { EmailAuthFailure, type EmailSignInResult, type EmailSignUpResult } from '../auth/emailPassword';
 import { GoogleOAuthFailure } from '../auth/googleOAuthFlow';
@@ -14,8 +13,7 @@ import type { AuthState } from '../hooks/useAuth';
 export interface AuthPanelActions {
   signInWithEmail(email: string, password: string): Promise<EmailSignInResult>;
   signUpWithEmail(email: string, password: string): Promise<EmailSignUpResult>;
-  verifySignupOtp(email: string, token: string): Promise<void>;
-  resendSignupOtp(email: string): Promise<void>;
+  resendSignupConfirmation(email: string): Promise<void>;
   signInWithGoogle(): Promise<void>;
   signOut(): Promise<void>;
 }
@@ -27,7 +25,7 @@ interface AuthPanelProps {
 }
 
 type AuthMode = 'sign-in' | 'sign-up';
-type AuthView = 'form' | 'verification' | 'verified';
+type AuthView = 'form' | 'confirmation';
 
 export const RESEND_COOLDOWN_SECONDS = 30;
 const RATE_LIMIT_COOLDOWN_SECONDS = 60;
@@ -49,8 +47,7 @@ function googleOAuthErrorMessage(cause: unknown): string {
 const defaultActions: AuthPanelActions = {
   signInWithEmail,
   signUpWithEmail,
-  verifySignupOtp,
-  resendSignupOtp,
+  resendSignupConfirmation,
   signInWithGoogle,
   signOut,
 };
@@ -76,7 +73,6 @@ export default function AuthPanel({ state, onClose, actions = defaultActions }: 
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [pendingEmail, setPendingEmail] = useState('');
-  const [otp, setOtp] = useState('');
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -142,9 +138,9 @@ export default function AuthPanel({ state, onClose, actions = defaultActions }: 
           const result = await actions.signInWithEmail(normalizedEmail, password);
           if (result === 'email-unverified') {
             setPendingEmail(normalizedEmail);
-            setView('verification');
-            setOtp('');
-            setMessage('Email confirmation is still required. Enter the code from your signup email, or request a new one.');
+            setView('confirmation');
+            setPendingEmail(normalizedEmail);
+            setMessage('Email confirmation is still required. Open the confirmation link from your email, if you have it. Then return to StreetMap and sign in.');
           } else {
             onClose();
           }
@@ -159,10 +155,9 @@ export default function AuthPanel({ state, onClose, actions = defaultActions }: 
 
         setPendingEmail(normalizedEmail);
         setPassword('');
-        setOtp('');
-        setView('verification');
+        setView('confirmation');
         setResendCooldown(RESEND_COOLDOWN_SECONDS);
-        setMessage(`Supabase accepted your signup request. If this address is eligible for signup, we've sent a verification code to ${maskEmail(normalizedEmail)}. Check your inbox and spam folder.`);
+        setMessage(`If this address is eligible for a new signup, Supabase will send a confirmation email to ${maskEmail(normalizedEmail)}.`);
       } catch (cause) {
         setError(`${emailErrorMessage(cause, 'Authentication could not be completed. Please try again.')}${emailErrorReference(cause)}`);
       }
@@ -182,35 +177,19 @@ export default function AuthPanel({ state, onClose, actions = defaultActions }: 
     });
   }
 
-  async function handleVerify(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setError('');
-    setMessage('');
-    await runExclusive(async () => {
-      try {
-        await actions.verifySignupOtp(pendingEmail, otp.trim());
-        setView('verified');
-        setOtp('');
-        setMessage('Email verified. Your StreetMap account is signed in.');
-      } catch (cause) {
-        setError(emailErrorMessage(cause, 'The code could not be verified. Check it and try again.'));
-      }
-    });
-  }
-
   async function handleResend() {
     if (resendCooldown > 0) return;
     setError('');
     setMessage('');
     await runExclusive(async () => {
       try {
-        await actions.resendSignupOtp(pendingEmail || email.trim());
+        await actions.resendSignupConfirmation(pendingEmail || email.trim());
         setResendCooldown(RESEND_COOLDOWN_SECONDS);
-        setView('verification');
-        setMessage('If a signup is pending for this address, a new verification code has been sent. Check your inbox and spam folder.');
+        setView('confirmation');
+        setMessage('If a signup is pending for this address, Supabase accepted a request to resend the confirmation email. Check your inbox and spam folder, click the link, then return to StreetMap and sign in.');
       } catch (cause) {
-        const safeMessage = emailErrorMessage(cause, 'Unable to resend the verification code. Please try again later.');
-        if (/too many verification requests/i.test(safeMessage)) setResendCooldown(RATE_LIMIT_COOLDOWN_SECONDS);
+        const safeMessage = emailErrorMessage(cause, 'Unable to resend the confirmation email. Please try again later.');
+        if (/too many confirmation email requests/i.test(safeMessage)) setResendCooldown(RATE_LIMIT_COOLDOWN_SECONDS);
         setError(safeMessage);
       }
     });
@@ -233,13 +212,9 @@ export default function AuthPanel({ state, onClose, actions = defaultActions }: 
   function returnToLogin() {
     setView('form');
     setMode('sign-in');
-    setOtp('');
     setError('');
     setMessage('');
   }
-
-  const signedInEmail = view === 'verified' ? (state.user?.email ?? pendingEmail) : state.user?.email;
-  const hasVerifiedAccount = view === 'verified' || (view === 'verification' && state.status === 'authenticated');
 
   return (
     <div className="auth-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
@@ -247,7 +222,7 @@ export default function AuthPanel({ state, onClose, actions = defaultActions }: 
         <button ref={closeButtonRef} className="auth-close" type="button" onClick={onClose} aria-label="Close account panel">×</button>
         <p className="eyebrow">STREETMAP ACCOUNT</p>
         <h2 id="auth-title">
-          {hasVerifiedAccount || state.status === 'authenticated' ? 'Your account' : view === 'verification' ? 'Check your email' : mode === 'sign-in' ? 'Welcome back' : 'Create your account'}
+          {state.status === 'authenticated' ? 'Your account' : view === 'confirmation' ? 'Check your email' : mode === 'sign-in' ? 'Welcome back' : 'Create your account'}
         </h2>
         {state.status === 'unconfigured' ? (
           <p className="auth-message">Sign-in is unavailable until this build has public Supabase project configuration.</p>
@@ -255,14 +230,6 @@ export default function AuthPanel({ state, onClose, actions = defaultActions }: 
           <p className="auth-error" role="alert">The saved session could not be read. Close and reopen the popup to try again.</p>
         ) : state.status === 'loading' ? (
           <p className="auth-message" role="status">Checking your session…</p>
-        ) : hasVerifiedAccount ? (
-          <div className="auth-success" role="status">
-            <p className="auth-success-title">Email verified</p>
-            <p className="auth-message">You're signed in{signedInEmail ? ` as ${signedInEmail}` : ''}. Your account is ready.</p>
-            <button className="auth-submit" type="button" onClick={() => void handleSignOut()} disabled={busy}>
-              {busy ? 'Signing out…' : 'Sign out'}
-            </button>
-          </div>
         ) : state.status === 'authenticated' ? (
           <>
             <p className="auth-message">Signed in{state.user?.email ? ` as ${state.user.email}` : ''}.</p>
@@ -270,32 +237,12 @@ export default function AuthPanel({ state, onClose, actions = defaultActions }: 
               {busy ? 'Signing out…' : 'Sign out'}
             </button>
           </>
-        ) : view === 'verification' ? (
+        ) : view === 'confirmation' ? (
           <>
-            <p className="auth-message">Enter the six-digit verification code sent to <strong>{maskEmail(pendingEmail)}</strong>. Check your inbox and spam folder.</p>
+            <p className="auth-message">If you received a confirmation email at <strong>{maskEmail(pendingEmail)}</strong>, open it and click its link. Then return to StreetMap and sign in with your email and password. Check your inbox and spam folder.</p>
             {message && <p className="auth-message" role="status">{message}</p>}
-            <form onSubmit={(event) => void handleVerify(event)}>
-              <label className="auth-label" htmlFor="auth-verification-code">Verification code</label>
-              <input
-                id="auth-verification-code"
-                className="auth-input auth-otp-input"
-                type="text"
-                inputMode="numeric"
-                autoComplete="one-time-code"
-                pattern="[0-9]{6}"
-                maxLength={6}
-                required
-                aria-describedby="auth-code-help"
-                value={otp}
-                onChange={(event) => setOtp(event.currentTarget.value.replace(/\D/g, '').slice(0, 6))}
-              />
-              <p id="auth-code-help" className="auth-field-help">Enter all six digits from the confirmation email.</p>
-              <button className="auth-submit" type="submit" disabled={busy || otp.length !== 6}>
-                {busy ? 'Verifying code…' : 'Verify email'}
-              </button>
-            </form>
             <button className="auth-secondary-button" type="button" onClick={() => void handleResend()} disabled={busy || resendCooldown > 0}>
-              {busy ? 'Sending…' : resendCooldown > 0 ? `Resend code in ${resendCooldown}s` : 'Resend verification code'}
+              {busy ? 'Sending…' : resendCooldown > 0 ? `Resend email in ${resendCooldown}s` : 'Resend confirmation email'}
             </button>
             <button className="auth-mode-toggle" type="button" onClick={returnToLogin} disabled={busy}>Back to login</button>
           </>
@@ -321,7 +268,7 @@ export default function AuthPanel({ state, onClose, actions = defaultActions }: 
             </form>
             {mode === 'sign-in' && pendingEmail && (
               <button className="auth-secondary-button" type="button" onClick={() => void handleResend()} disabled={busy || resendCooldown > 0}>
-                {busy ? 'Sending…' : resendCooldown > 0 ? `Resend code in ${resendCooldown}s` : 'Resend verification code'}
+                {busy ? 'Sending…' : resendCooldown > 0 ? `Resend email in ${resendCooldown}s` : 'Resend confirmation email'}
               </button>
             )}
             <button className="auth-mode-toggle" type="button" onClick={() => { setMode(mode === 'sign-in' ? 'sign-up' : 'sign-in'); setError(''); setMessage(''); }} disabled={busy}>

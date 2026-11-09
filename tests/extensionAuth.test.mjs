@@ -13,12 +13,11 @@ import {
 } from '../src/popup/auth/config.ts';
 import { createAuthStorage, restrictAuthStorageToTrustedContexts } from '../src/popup/auth/extensionStorage.ts';
 import {
-  resendSignupOtpUsing,
+  resendSignupConfirmationUsing,
   classifySignupFailure,
   signInWithEmailUsing,
   signOutLocally,
   signUpWithEmailUsing,
-  verifySignupOtpUsing,
 } from '../src/popup/auth/emailPassword.ts';
 import { observeAuthState } from '../src/popup/auth/authStateObserver.ts';
 import { GoogleOAuthFailure, runGoogleOAuthFlow, runGoogleOAuthFlowWithLock } from '../src/popup/auth/googleOAuthFlow.ts';
@@ -450,45 +449,29 @@ test('unverified login offers a distinct safe result without treating the user a
   assert.equal(await signInWithEmailUsing(client, 'reader@example.test', 'synthetic-password'), 'email-unverified');
 });
 
-test('signup OTP verification uses the installed SDK email OTP type and requires a current matching session', async () => {
-  const calls = [];
-  const session = { user: { email: 'reader@example.test' } };
+test('signup requiring confirmation does not exchange an OTP or create a local session', async () => {
   const client = { auth: {
-    async verifyOtp(params) { calls.push(['verify', params]); return { data: { session }, error: null }; },
-    async getSession() { calls.push(['session']); return { data: { session }, error: null }; },
+    async signUp() { return { data: { user: { id: 'synthetic-user' }, session: null }, error: null }; },
+    async verifyOtp() { assert.fail('confirmation link flow must not verify an OTP in the extension'); },
+    async getSession() { return { data: { session: null }, error: null }; },
   } };
-  await verifySignupOtpUsing(client, 'reader@example.test', '123456');
-  assert.deepEqual(calls, [
-    ['verify', { email: 'reader@example.test', token: '123456', type: 'email' }],
-    ['session'],
-  ]);
+  assert.equal(await signUpWithEmailUsing(client, 'reader@example.test', 'synthetic-password'), 'verification-pending');
 });
 
-test('invalid, expired, and sessionless verification failures stay generic and fail closed', async () => {
-  const invalidClient = { auth: {
-    async verifyOtp() { return { data: { session: null }, error: { code: 'otp_expired', message: 'provider detail' } }; },
-  } };
-  await assert.rejects(verifySignupOtpUsing(invalidClient, 'reader@example.test', '123456'), /invalid or expired/);
-  const noSessionClient = { auth: {
-    async verifyOtp() { return { data: { session: null }, error: null }; },
-  } };
-  await assert.rejects(verifySignupOtpUsing(noSessionClient, 'reader@example.test', '123456'), /did not receive an active session/);
-});
-
-test('signup verification resend uses the signup endpoint without a browser redirect', async () => {
+test('signup confirmation resend uses Supabase signup resend without an extension redirect', async () => {
   let request;
-  await resendSignupOtpUsing({ auth: {
+  await resendSignupConfirmationUsing({ auth: {
     async resend(params) { request = params; return { data: { user: null, session: null }, error: null }; },
   } }, 'reader@example.test');
   assert.deepEqual(request, { type: 'signup', email: 'reader@example.test' });
 });
 
-test('signup verification resend maps rate limits without exposing provider errors', async () => {
+test('signup confirmation resend maps rate limits without exposing provider errors', async () => {
   const client = { auth: {
     async resend() { return { data: { user: null, session: null }, error: { code: 'over_email_send_rate_limit', status: 429, message: 'private provider detail' } }; },
   } };
-  await assert.rejects(resendSignupOtpUsing(client, 'reader@example.test'), (error) => {
-    assert.match(error.message, /Too many verification requests/);
+  await assert.rejects(resendSignupConfirmationUsing(client, 'reader@example.test'), (error) => {
+    assert.match(error.message, /Too many confirmation email requests/);
     assert.equal(error.message.includes('private provider detail'), false);
     return true;
   });
@@ -719,5 +702,3 @@ test('Google PKCE flows in separate popup contexts share an exclusive Web Lock',
   assert.equal(authorizationCount, 2);
   assert.deepEqual(requestedNames, ['streetmap-google-oauth-pkce', 'streetmap-google-oauth-pkce']);
 });
-
-\n

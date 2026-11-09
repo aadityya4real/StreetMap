@@ -3,7 +3,7 @@ import type { AuthError, Session, SupabaseClient } from '@supabase/supabase-js';
 export type EmailSignInResult = 'authenticated' | 'email-unverified';
 export type EmailSignUpResult = 'authenticated' | 'verification-pending';
 
-export type EmailAuthFailureKind = 'login' | 'signup' | 'verification' | 'missing-session' | 'resend' | 'rate-limited' | 'sign-out' | 'network';
+export type EmailAuthFailureKind = 'login' | 'signup' | 'missing-session' | 'resend' | 'rate-limited' | 'sign-out' | 'network';
 
 export class EmailAuthFailure extends Error {
   constructor(
@@ -104,8 +104,9 @@ export async function signUpWithEmailUsing(
   email: string,
   password: string,
 ): Promise<EmailSignUpResult> {
-  // Deliberately omit emailRedirectTo. Signup verification is an OTP entered
-  // inside the extension, not a browser redirect to Supabase's Site URL.
+  // Deliberately omit emailRedirectTo. Supabase verifies the confirmation link
+  // and redirects to the project's configured Site URL; users then return to
+  // the extension and sign in. The email link does not restore this session.
   let response;
   try {
     response = await client.auth.signUp({ email, password });
@@ -124,37 +125,18 @@ export async function signUpWithEmailUsing(
   return 'authenticated';
 }
 
-export async function verifySignupOtpUsing(client: SupabaseClient, email: string, token: string): Promise<void> {
-  let response;
-  try {
-    response = await client.auth.verifyOtp({ email, token, type: 'email' });
-  } catch {
-    throw new EmailAuthFailure('verification', 'The code could not be verified. Please try again.');
-  }
-  const { data, error } = response;
-  if (error) throw new EmailAuthFailure('verification', 'That verification code is invalid or expired. Request a new code and try again.');
-  if (!data.session) {
-    throw new EmailAuthFailure('missing-session', 'Email verification completed, but StreetMap did not receive an active session. Please sign in.');
-  }
-
-  const session = await readSession(client);
-  if (!session || session.user.email?.toLowerCase() !== email.toLowerCase()) {
-    throw new EmailAuthFailure('missing-session', 'Email verification completed, but StreetMap could not confirm the signed-in account. Please sign in.');
-  }
-}
-
-export async function resendSignupOtpUsing(client: SupabaseClient, email: string): Promise<void> {
+export async function resendSignupConfirmationUsing(client: SupabaseClient, email: string): Promise<void> {
   let error;
   try {
     ({ error } = await client.auth.resend({ type: 'signup', email }));
   } catch {
-    throw new EmailAuthFailure('resend', 'Unable to resend the verification code. Please try again later.');
+    throw new EmailAuthFailure('resend', 'Unable to resend the confirmation email. Please try again later.');
   }
   if (!error) return;
   if (isRateLimitError(error)) {
-    throw new EmailAuthFailure('rate-limited', 'Too many verification requests. Please wait before requesting another code.');
+    throw new EmailAuthFailure('rate-limited', 'Too many confirmation email requests. Please wait before requesting another email.');
   }
-  throw new EmailAuthFailure('resend', 'Unable to resend the verification code. Please try again later.');
+  throw new EmailAuthFailure('resend', 'Unable to resend the confirmation email. Please try again later.');
 }
 
 function isRateLimitError(error: AuthError): boolean {

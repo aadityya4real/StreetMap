@@ -267,19 +267,6 @@ input:focus-visible {
   font-weight: 700;
 }
 
-.auth-otp-input {
-  text-align: center;
-  font-size: 20px;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.35em;
-}
-
-.auth-field-help {
-  margin: 5px 0 0;
-  color: var(--color-muted);
-  font-size: 10px;
-}
-
 .auth-secondary-button {
   width: 100%;
   min-height: 36px;
@@ -301,17 +288,6 @@ input:focus-visible {
 .auth-secondary-button:disabled {
   cursor: wait;
   opacity: 0.6;
-}
-
-.auth-success {
-  padding-top: 2px;
-}
-
-.auth-success-title {
-  margin: 0;
-  color: #397354;
-  font-size: 13px;
-  font-weight: 750;
 }
 
 .auth-mode-toggle {
