@@ -238,7 +238,7 @@ func TestCombinedContextCursorBindsLabelCoordinatesAndRadius(t *testing.T) {
 	cursor, err := notes.EncodeCursor(notes.Cursor{
 		ContextKey: key, Phase: notes.PhaseNearby,
 		CreatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
-		DistanceM: 650, NoteID: "00000000-0000-0000-0000-000000000001",
+		DistanceM: 650, NearbyRank: 1, NoteID: "00000000-0000-0000-0000-000000000001",
 	})
 	if err != nil {
 		t.Fatal(err)

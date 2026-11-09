@@ -344,6 +344,95 @@ func TestPublicNotesContextsAndNearbyPolicy(t *testing.T) {
 		}
 	})
 
+	t.Run("nearby ranking interleaves locations and keeps votes out of ranking", func(t *testing.T) {
+		createdAt := func(day int) time.Time { return time.Date(2026, 7, day, 0, 0, 0, 0, time.UTC) }
+		createPoint := func(label string, distance float64) string {
+			t.Helper()
+			var locationID string
+			err := tx.QueryRowContext(ctx, `
+				INSERT INTO locations (location_type, provider, provider_place_id, display_label, coordinates)
+				VALUES ('verified_place', 'test-provider', gen_random_uuid()::text, $1,
+					ST_Project(ST_SetSRID(ST_MakePoint(0::double precision, 0::double precision), 4326)::geography,
+						$2::double precision, 90::double precision))
+				RETURNING id::text`, label, distance).Scan(&locationID)
+			if err != nil {
+				t.Fatalf("insert nearby location %q: %v", label, err)
+			}
+			return locationID
+		}
+		locationA := createPoint("Round A", 100)
+		locationB := createPoint("Round B", 100)
+		locationC := createPoint("Sparse C", 300)
+
+		aNewest := createTestNote(t, ctx, tx, userID, locationA, "A newest", "published", createdAt(10))
+		aMiddle := createTestNote(t, ctx, tx, userID, locationA, "A middle", "published", createdAt(9))
+		aOldest := createTestNote(t, ctx, tx, userID, locationA, "A oldest", "published", createdAt(8))
+		bNewest := createTestNote(t, ctx, tx, userID, locationB, "B newest", "published", createdAt(11))
+		bOldest := createTestNote(t, ctx, tx, userID, locationB, "B oldest", "published", createdAt(7))
+		cOnly := createTestNote(t, ctx, tx, userID, locationC, "C only", "published", createdAt(6))
+
+		for range 4 {
+			voterID := createTestUser(t, ctx, tx)
+			if _, err := tx.ExecContext(ctx, `INSERT INTO votes (note_id, user_id) VALUES ($1, $2)`, aMiddle, voterID); err != nil {
+				t.Fatalf("insert helpful vote fixture: %v", err)
+			}
+		}
+
+		query := notes.Query{Context: notes.Context{Type: notes.ContextMapCenter, Latitude: 0, Longitude: 0, RadiusM: 500}, Limit: 3}
+		first, err := reader.ListPublicNotes(ctx, query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		repeatedFirst, err := reader.ListPublicNotes(ctx, query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		idsOf := func(page notes.Page) []string {
+			ids := make([]string, len(page.Nearby))
+			for index, note := range page.Nearby {
+				ids[index] = note.ID
+			}
+			return ids
+		}
+		if !slices.Equal(idsOf(first), idsOf(repeatedFirst)) {
+			t.Fatalf("repeated first page changed order: %v vs %v", idsOf(first), idsOf(repeatedFirst))
+		}
+		if len(first.Nearby) != 3 || first.Nearby[0].ID != bNewest || first.Nearby[1].ID != aNewest || first.Nearby[2].ID != cOnly {
+			t.Fatalf("first diversity round did not include one note per location in distance/recency order: %+v", first.Nearby)
+		}
+
+		seen := append([]string(nil), idsOf(first)...)
+		middleVoteCount := int64(-1)
+		for _, note := range first.Nearby {
+			if note.ID == aMiddle {
+				middleVoteCount = note.HelpfulVoteCount
+			}
+		}
+		for first.HasMore {
+			if first.NextCursor == nil {
+				t.Fatal("has_more page did not include a cursor")
+			}
+			query.Cursor = first.NextCursor
+			first, err = reader.ListPublicNotes(ctx, query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seen = append(seen, idsOf(first)...)
+			for _, note := range first.Nearby {
+				if note.ID == aMiddle {
+					middleVoteCount = note.HelpfulVoteCount
+				}
+			}
+		}
+		wantIDs := []string{bNewest, aNewest, cOnly, aMiddle, bOldest, aOldest}
+		if !slices.Equal(seen, wantIDs) {
+			t.Fatalf("diverse pagination skipped, repeated, or misranked notes: got %v, want %v", seen, wantIDs)
+		}
+		if middleVoteCount != 4 {
+			t.Fatalf("helpful-vote metadata = %d, want 4", middleVoteCount)
+		}
+	})
+
 	t.Run("nearby query excludes locations without coordinates and empty results have no cursor", func(t *testing.T) {
 		var locationID string
 		if err := tx.QueryRowContext(ctx, `

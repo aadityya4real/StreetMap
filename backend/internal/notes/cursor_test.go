@@ -35,4 +35,22 @@ func TestCursorIsBoundToContextAndRejectsInvalidValues(t *testing.T) {
 	if _, err := DecodeCursor(strings.Repeat("A", maxCursorLength+1), contextKey); err == nil {
 		t.Fatal("oversized cursor was accepted")
 	}
+
+	nearbyCursor := Cursor{
+		ContextKey: contextKey, Phase: PhaseNearby, NearbyRank: 2,
+		CreatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), DistanceM: 650,
+		NoteID: "00000000-0000-0000-0000-000000000001",
+	}
+	nearbyEncoded, err := EncodeCursor(nearbyCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nearbyDecoded, err := DecodeCursor(nearbyEncoded, contextKey)
+	if err != nil || nearbyDecoded.NearbyRank != nearbyCursor.NearbyRank {
+		t.Fatalf("decode nearby cursor = %+v, err=%v", nearbyDecoded, err)
+	}
+	nearbyCursor.NearbyRank = 0
+	if _, err := EncodeCursor(nearbyCursor); err == nil {
+		t.Fatal("nearby keyset cursor without a diversity rank was accepted")
+	}
 }

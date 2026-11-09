@@ -27,9 +27,19 @@ npm test
 
 Production builds do not default to localhost and do not include the development loopback host permission. They show an API-configuration state for supported Maps contexts; this milestone has no production API setting, and no production API is currently deployed.
 
-To run the extension against the local backend, follow the database and environment setup in [`backend/README.md`](backend/README.md), apply any pending Goose migrations, and start the API on its documented `127.0.0.1:8080` address. Then run `npm run dev` from the repository root. The popup makes public read-only requests; it does not require an account or send cookies.
+To run the extension against the local backend, follow the database and environment setup in [`backend/README.md`](backend/README.md), apply any pending Goose migrations, and start the API on its documented `127.0.0.1:8080` address. Then run `npm run dev` from the repository root. Public note requests remain anonymous and do not send cookies; extension sign-in is separate and is not required to browse notes.
 
 The production unpacked extension is written to `.output/chrome-mv3`. To load it manually, open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select that directory. Reload the extension from the extensions page after rebuilding. For API-backed results while developing, use the WXT development profile (`npm run dev`) or load the development output with its local-only host permission.
+
+## Extension account setup
+
+Copy `.env.example` to `.env.local` and set `VITE_SUPABASE_ANON_KEY` to the project's public anon/publishable key. The project URL is also build-time public configuration. Never use a `service_role` or `sb_secret` key in the extension. `.env.local` is ignored by Git. If the values are missing or invalid, account sign-in is disabled while anonymous public-note browsing continues. Builds request a host permission only for the configured Supabase project origin; development builds retain the separate loopback API permission.
+
+The popup uses Supabase Auth with email/password and Google sign-in. Google uses Chrome's `identity.launchWebAuthFlow`; the callback is generated from the installed extension ID at runtime and is not pinned in the manifest. In the Supabase dashboard, enable Google and add the exact `chrome.identity.getRedirectURL()` value for the installed development extension under **Authentication → URL Configuration → Redirect URLs**. Repeat with the published extension's stable Web Store ID before release. The Google Cloud OAuth client remains configured only in Supabase, with its authorized redirect URI set to `https://<project-ref>.supabase.co/auth/v1/callback`; never place its client secret in StreetMap. Confirm email signup is enabled and that the project's email delivery settings can deliver verification messages. The default hosted mailer may be rate-limited; production email reliability needs a separately approved SMTP plan.
+
+Supabase session data is stored in `chrome.storage.local` through the Supabase client storage adapter, after storage access is restricted to trusted extension contexts. The Maps content script does not import auth code and cannot read extension storage. The popup does not display or message tokens, and public notes requests remain anonymous. The current Go API has JWT verification and identity provisioning foundations, but it has no protected contribution endpoints; authenticated API use is not part of this stage. Sign-out clears the extension's local Supabase session and does not sign out another client.
+
+For a development OAuth test, load the WXT dev extension, inspect its actual ID in `chrome://extensions`, obtain its redirect from `chrome.identity.getRedirectURL()` in the extension popup console, and allowlist that exact URL in Supabase. Google Cloud and Supabase dashboard setup are required before real login can be tested.
 
 `npm test` uses Node's built-in test runner with `tsx` to execute the TypeScript and React component tests. `happy-dom` supplies a lightweight DOM for the popup interaction checks.
 
@@ -76,8 +86,10 @@ Parser, API envelope validation, query construction, empty/error/retry state, in
 - `src/popup/services/locationContext.ts` — isolated Chrome tab and message APIs.
 - `src/popup/services/publicNotes.ts` — context-to-query mapping, API request, and untrusted response validation.
 - `public/icons` — local toolbar PNGs.
-- `wxt.config.ts` — MV3 metadata, existing `activeTab` and `scripting` permissions, and the development-only local API host permission.
+- `src/popup/auth` — public Supabase config validation, trusted Chrome storage, Google PKCE callback exchange, and email/password session operations.
+- `src/popup/hooks/useAuth.ts` and `src/popup/components/AuthPanel.tsx` — popup auth state and account panel.
+- `wxt.config.ts` — MV3 metadata, extension identity/storage permissions, exact configured Supabase host permission, and the development-only local API host permission.
 
 ## Backend foundation
 
-The Go API and PostgreSQL/PostGIS schema live in [`backend/`](backend/README.md). The public notes endpoint is read-only; this extension milestone adds no authentication, note creation, voting, or reporting.
+The Go API and PostgreSQL/PostGIS schema live in [`backend/`](backend/README.md). The public notes endpoint is read-only; this extension milestone adds account sign-in only and no note creation, voting, or reporting.

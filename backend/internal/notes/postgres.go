@@ -279,8 +279,9 @@ func (reader *PostgresReader) readSimpleNotes(ctx context.Context, statement str
 }
 
 func (reader *PostgresReader) readNearby(ctx context.Context, query Query, excludeLocationID string, limit int, cursor *Cursor, locationLatitude, locationLongitude sql.NullFloat64, excludeLabelType, excludeLabel string) ([]Note, error) {
-	var afterDistance, afterCreatedAt, afterID any
+	var afterRank, afterDistance, afterCreatedAt, afterID any
 	if cursor != nil && cursor.Phase == PhaseNearby && cursor.NoteID != "" {
+		afterRank = cursor.NearbyRank
 		afterDistance = cursor.DistanceM
 		afterCreatedAt = cursor.CreatedAt
 		afterID = cursor.NoteID
@@ -305,13 +306,13 @@ func (reader *PostgresReader) readNearby(ctx context.Context, query Query, exclu
 	}
 	rows, err := reader.db.QueryContext(ctx, nearbySQL,
 		originLocation, latitude, longitude, radius, excludedLocation,
-		afterDistance, afterCreatedAt, afterID, limit, nullableString(excludeLabelType), nullableString(excludeLabel),
+		afterRank, afterDistance, afterCreatedAt, afterID, limit, nullableString(excludeLabelType), nullableString(excludeLabel),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("query nearby public notes: %w", err)
 	}
 	defer rows.Close()
-	return scanNotes(rows)
+	return scanNearbyNotes(rows)
 }
 
 func nullableString(value string) any {
@@ -343,6 +344,30 @@ func scanNotes(rows *sql.Rows) ([]Note, error) {
 	return notes, nil
 }
 
+func scanNearbyNotes(rows *sql.Rows) ([]Note, error) {
+	nearbyNotes := make([]Note, 0)
+	for rows.Next() {
+		var note Note
+		var distance sql.NullFloat64
+		var nearbyRank int64
+		if err := rows.Scan(
+			&note.ID, &note.Title, &note.Body, &note.Category, &note.AuthorDisplayName,
+			&note.CreatedAt, &note.HelpfulVoteCount, &note.LocationLabel, &distance, &nearbyRank,
+		); err != nil {
+			return nil, fmt.Errorf("scan nearby public note: %w", err)
+		}
+		if distance.Valid {
+			note.DistanceM = &distance.Float64
+		}
+		note.NearbyRank = int(nearbyRank)
+		nearbyNotes = append(nearbyNotes, note)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate nearby public notes: %w", err)
+	}
+	return nearbyNotes, nil
+}
+
 func nearbyCount(cursor *Cursor) int {
 	if cursor == nil {
 		return 0
@@ -368,7 +393,7 @@ func newNearbyCursor(query Query, note Note, count int) *Cursor {
 	if note.DistanceM != nil {
 		distance = *note.DistanceM
 	}
-	return &Cursor{ContextKey: key, Phase: PhaseNearby, CreatedAt: note.CreatedAt, DistanceM: distance, NoteID: note.ID, NearbyCount: count}
+	return &Cursor{ContextKey: key, Phase: PhaseNearby, CreatedAt: note.CreatedAt, DistanceM: distance, NearbyRank: note.NearbyRank, NoteID: note.ID, NearbyCount: count}
 }
 
 func newStartCursor(query Query, phase CursorPhase, count int) *Cursor {
@@ -415,6 +440,10 @@ const exactCoordinateSQL = `
 	ORDER BY n.created_at DESC, n.id DESC
 	LIMIT $5`
 
+// nearbySQL emits notes in location rounds: each eligible location's first
+// candidate is ranked before any location's second candidate. Distance,
+// recency, and ID order candidates within each location round and break ties
+// across locations. Helpful votes remain display metadata, not ranking input.
 const nearbySQL = `
 	WITH origin(point) AS (
 		SELECT coordinates FROM locations
@@ -423,7 +452,7 @@ const nearbySQL = `
 		SELECT ST_SetSRID(ST_MakePoint($3::double precision, $2::double precision), 4326)::geography
 		WHERE $1::uuid IS NULL
 	), candidates AS (
-		SELECT n.id::text AS id, n.title, n.body, n.category, u.display_name AS author_display_name,
+		SELECT n.id::text AS id, n.location_id, n.title, n.body, n.category, u.display_name AS author_display_name,
 			n.created_at, (SELECT count(*) FROM votes v WHERE v.note_id = n.id AND v.vote_type = 'helpful')::bigint AS vote_count,
 			l.display_label AS location_label, ST_Distance(l.coordinates, origin.point) AS distance_m
 		FROM notes n
@@ -434,18 +463,25 @@ const nearbySQL = `
 			AND l.coordinates IS NOT NULL
 			AND l.location_type IN ('verified_place', 'coordinate_only')
 			AND ($5::uuid IS NULL OR n.location_id <> $5::uuid)
-			AND ($10::text IS NULL OR NOT EXISTS (
+			AND ($11::text IS NULL OR NOT EXISTS (
 				SELECT 1 FROM locations context_location
 				WHERE context_location.id = n.location_id
-					AND context_location.location_type = $10::text
-					AND lower(btrim(context_location.display_label)) = lower(btrim($11::text))
+					AND context_location.location_type = $11::text
+					AND lower(btrim(context_location.display_label)) = lower(btrim($12::text))
 			))
 			AND ST_DWithin(l.coordinates, origin.point, $4::double precision)
+	), ranked_candidates AS (
+		SELECT candidates.*,
+			row_number() OVER (PARTITION BY location_id ORDER BY distance_m ASC, created_at DESC, id DESC) AS nearby_rank
+		FROM candidates
 	)
-	SELECT id, title, body, category, author_display_name, created_at, vote_count, location_label, distance_m
-	FROM candidates
-	WHERE $6::double precision IS NULL
-		OR distance_m > $6::double precision
-		OR (distance_m = $6::double precision AND (created_at, id) < ($7::timestamptz, $8::text))
-	ORDER BY distance_m ASC, created_at DESC, id DESC
-	LIMIT $9`
+	SELECT id, title, body, category, author_display_name, created_at, vote_count, location_label, distance_m, nearby_rank
+	FROM ranked_candidates
+	WHERE $6::bigint IS NULL
+		OR nearby_rank > $6::bigint
+		OR (nearby_rank = $6::bigint AND (
+			distance_m > $7::double precision
+			OR (distance_m = $7::double precision AND (created_at, id) < ($8::timestamptz, $9::text))
+		))
+	ORDER BY nearby_rank ASC, distance_m ASC, created_at DESC, id DESC
+	LIMIT $10`

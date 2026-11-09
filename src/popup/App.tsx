@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { LocationContext } from '../shared/locationContext';
 import Header from './components/Header';
+import AuthPanel from './components/AuthPanel';
 import LocationContextPanel from './components/LocationContextPanel';
 import NotesList from './components/NotesList';
 import SearchInput from './components/SearchInput';
@@ -9,11 +10,15 @@ import useNotesFeed from './hooks/useNotesFeed';
 import { useNoteSearch } from './hooks/useNoteSearch';
 import { getActiveLocationContext, subscribeToActiveTabLocationChanges } from './services/locationContext';
 import { fetchPublicNotes } from './services/publicNotes';
+import { useAuth } from './hooks/useAuth';
 
 export default function App() {
   const [query, setQuery] = useState('');
   const [isSearchExpanded, setIsSearchExpanded] = useState(false);
   const [shareMessage, setShareMessage] = useState('');
+  const [isAuthPanelOpen, setIsAuthPanelOpen] = useState(false);
+  const auth = useAuth();
+  const closeAuthPanel = useCallback(() => setIsAuthPanelOpen(false), []);
   const {
     locationContext,
     notesState,
@@ -62,7 +67,11 @@ export default function App() {
 
   return (
     <div className="popup-shell">
-      <Header />
+      <Header
+        accountLabel={auth.status === 'authenticated' ? 'ACCOUNT' : 'SIGN IN'}
+        onAccountClick={() => setIsAuthPanelOpen(true)}
+      />
+      {isAuthPanelOpen && <AuthPanel state={auth} onClose={closeAuthPanel} />}
       <LocationContextPanel context={locationContext} onRefresh={refreshLocationContext} />
       <main className="popup-main" id="community-notes">
         <div className="section-heading">

@@ -72,10 +72,10 @@ func validateCursor(cursor Cursor) error {
 		if cursor.NearbyCount < 0 || cursor.NearbyCount > maxNearbySupplement {
 			return errors.New("invalid nearby cursor")
 		}
-		if cursor.NoteID == "" && cursor.CreatedAt.IsZero() && cursor.DistanceM == 0 {
+		if cursor.NoteID == "" && cursor.CreatedAt.IsZero() && cursor.DistanceM == 0 && cursor.NearbyRank == 0 {
 			return nil
 		}
-		if cursor.CreatedAt.IsZero() || !canonicalUUID.MatchString(cursor.NoteID) || math.IsNaN(cursor.DistanceM) || math.IsInf(cursor.DistanceM, 0) || cursor.DistanceM < 0 || cursor.DistanceM > 5000 {
+		if cursor.NearbyRank < 1 || cursor.CreatedAt.IsZero() || !canonicalUUID.MatchString(cursor.NoteID) || math.IsNaN(cursor.DistanceM) || math.IsInf(cursor.DistanceM, 0) || cursor.DistanceM < 0 || cursor.DistanceM > 5000 {
 			return errors.New("invalid nearby keyset cursor")
 		}
 	default:

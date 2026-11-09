@@ -43,6 +43,7 @@ type Cursor struct {
 	Phase       CursorPhase `json:"phase"`
 	CreatedAt   time.Time   `json:"created_at,omitempty"`
 	DistanceM   float64     `json:"distance_m,omitempty"`
+	NearbyRank  int         `json:"nearby_rank,omitempty"`
 	NoteID      string      `json:"note_id,omitempty"`
 	NearbyCount int         `json:"nearby_count,omitempty"`
 }
@@ -63,6 +64,7 @@ type Note struct {
 	HelpfulVoteCount  int64
 	LocationLabel     string
 	DistanceM         *float64
+	NearbyRank        int
 	MatchType         string
 }
 

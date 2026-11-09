@@ -10,14 +10,22 @@ function PinMark() {
   );
 }
 
-export default function Header() {
+interface HeaderProps {
+  accountLabel: string;
+  onAccountClick: () => void;
+}
+
+export default function Header({ accountLabel, onAccountClick }: HeaderProps) {
   return (
     <header className="app-header">
       <div className="brand">
         <PinMark />
         <span>StreetMap</span>
       </div>
-      <span className="header-tag">LOCAL KNOWLEDGE</span>
+      <div className="header-actions">
+        <span className="header-tag">LOCAL KNOWLEDGE</span>
+        <button className="account-button" type="button" onClick={onAccountClick}>{accountLabel}</button>
+      </div>
     </header>
   );
 }
