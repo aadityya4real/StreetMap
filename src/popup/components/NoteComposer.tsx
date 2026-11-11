@@ -19,6 +19,9 @@ export interface NoteComposerActions {
 
 interface NoteComposerProps {
   context: LocationContext;
+  isAuthenticated?: boolean;
+  authPanelOpen?: boolean;
+  onAuthenticationRequired?: () => void;
   onClose: () => void;
   onPublished?: (note: PublicNote) => void;
   actions?: NoteComposerActions;
@@ -118,22 +121,43 @@ export function validateComposerFields(title: string, body: string, category: No
   return nextErrors;
 }
 
-export default function NoteComposer({ context, onClose, onPublished, actions = defaultActions }: NoteComposerProps) {
+export default function NoteComposer({
+  context,
+  isAuthenticated = false,
+  authPanelOpen = false,
+  onAuthenticationRequired,
+  onClose,
+  onPublished,
+  actions = defaultActions,
+}: NoteComposerProps) {
   const dialogRef = useRef<HTMLElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const submitLock = useRef(false);
   const attemptRef = useRef<{ signature: string; attempt: CreateNoteAttempt } | null>(null);
+  const authPanelOpenRef = useRef(authPanelOpen);
+  const wasAuthenticatedRef = useRef(isAuthenticated);
+  authPanelOpenRef.current = authPanelOpen;
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
   const [category, setCategory] = useState<NoteCategory>('local_tip');
   const [hasSubmitted, setHasSubmitted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [authenticationRequired, setAuthenticationRequired] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<ComposerFieldErrors>({});
   const [publishedNote, setPublishedNote] = useState<PublicNote | null>(null);
-  const location = getComposerLocation(context);
+  const [location] = useState(() => getComposerLocation(context));
 
   useEffect(() => {
+    const becameAuthenticated = !wasAuthenticatedRef.current && isAuthenticated;
+    wasAuthenticatedRef.current = isAuthenticated;
+    if (!becameAuthenticated || !authenticationRequired) return;
+    setAuthenticationRequired(false);
+    setError('You’re signed in. Review your draft, then select “Share note” to publish it.');
+  }, [isAuthenticated, authenticationRequired]);
+
+  useEffect(() => {
+    if (authPanelOpen) return undefined;
     const previousFocus = document.activeElement;
     closeButtonRef.current?.focus();
     function handleKeyDown(event: KeyboardEvent) {
@@ -160,9 +184,9 @@ export default function NoteComposer({ context, onClose, onPublished, actions = 
     document.addEventListener('keydown', handleKeyDown);
     return () => {
       document.removeEventListener('keydown', handleKeyDown);
-      if (previousFocus instanceof HTMLElement) previousFocus.focus();
+      if (!authPanelOpenRef.current && previousFocus instanceof HTMLElement) previousFocus.focus();
     };
-  }, [onClose]);
+  }, [authPanelOpen, onClose]);
 
   function validate(): boolean {
     const nextErrors = validateComposerFields(title, body, category);
@@ -201,7 +225,17 @@ export default function NoteComposer({ context, onClose, onPublished, actions = 
       onPublished?.(result.note);
     } catch (cause) {
       if (cause instanceof CreateNoteApiError) {
-        setError(cause.message);
+        if (cause.kind === 'authentication') {
+          setAuthenticationRequired(true);
+          setError(
+            isAuthenticated
+              ? 'StreetMap could not verify the current session. Sign out in the account panel, then sign in again. Your draft is still here.'
+              : 'Sign in to publish this note. Your draft will stay here, and you can review it before publishing.',
+          );
+          onAuthenticationRequired?.();
+        } else {
+          setError(cause.message);
+        }
         setFieldErrors(cause.fieldErrors ?? {});
       } else {
         setError('StreetMap could not publish this note. Please try again.');
@@ -316,6 +350,13 @@ export default function NoteComposer({ context, onClose, onPublished, actions = 
             </div>
 
             {error && <p className="composer-error" role="alert">{error}</p>}
+            {authenticationRequired && (
+              <div className="composer-auth-required" role="status">
+                <button className="auth-secondary-button" type="button" onClick={onAuthenticationRequired} disabled={busy}>
+                  {isAuthenticated ? 'Open account' : 'Sign in to publish'}
+                </button>
+              </div>
+            )}
             <div className="composer-actions">
               <button className="auth-secondary-button" type="button" onClick={onClose} disabled={busy}>Cancel</button>
               <button className="auth-submit" type="submit" disabled={busy}>

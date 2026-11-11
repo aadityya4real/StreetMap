@@ -44,6 +44,9 @@ function mount(element) {
   act(() => root.render(element));
   return {
     container,
+    rerender(nextElement) {
+      act(() => root.render(nextElement));
+    },
     unmount() {
       act(() => root.unmount());
       container.remove();
@@ -213,12 +216,150 @@ test('disables duplicate submissions while pending and shows safe API errors', a
     assert.equal(mounted.container.querySelector('button[type="submit"]').textContent, 'Sharing note…');
     assert.equal(submitted, 1);
     await act(async () => {
+      form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+    assert.equal(submitted, 1, 'a second submit while the first is pending must be ignored');
+    await act(async () => {
       releaseSubmit();
       await new Promise((resolve) => window.setTimeout(resolve, 0));
     });
     await submission;
-    assert.match(mounted.container.textContent, /session is missing or expired/);
+    assert.match(mounted.container.textContent, /Sign in to publish this note/);
     assert.equal(mounted.container.querySelector('button[type="submit"]').disabled, false);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test('preserves the complete draft through authentication and requires an explicit publish after login', async () => {
+  let isAuthenticated = false;
+  let authRequests = 0;
+  let submitCalls = 0;
+  let currentContext = placeContext;
+  let createdRequest;
+  let published;
+  const attempt = {
+    async submit() {
+      submitCalls++;
+      if (submitCalls === 1) throw new CreateNoteApiError('authentication', 'Your StreetMap session is missing or expired. Sign in and try again.');
+      return { note: validNote, replayed: false };
+    },
+  };
+  const renderComposer = () => React.createElement(NoteComposer, {
+    context: currentContext,
+    isAuthenticated,
+    onAuthenticationRequired: () => { authRequests++; },
+    onPublished: (note) => { published = note; },
+    onClose: () => undefined,
+    actions: { createNoteAttempt: (request) => { createdRequest = request; return attempt; } },
+  });
+  const mounted = mount(renderComposer());
+  try {
+    setInput(mounted.container, '#composer-title-input', 'Helpful garden entrance');
+    setInput(mounted.container, '#composer-body-input', 'Use the public path along the east wall.');
+    await submit(mounted.container);
+
+    assert.equal(authRequests, 1);
+    assert.equal(submitCalls, 1);
+    assert.equal(published, undefined);
+    assert.equal(mounted.container.querySelector('#composer-title-input').value, 'Helpful garden entrance');
+    assert.equal(mounted.container.querySelector('#composer-body-input').value, 'Use the public path along the east wall.');
+    assert.equal(mounted.container.querySelector('#composer-category').value, 'local_tip');
+    assert.match(mounted.container.textContent, /Sign in to publish this note/);
+
+    currentContext = { status: 'broad-area', sourceHostname: 'www.google.com', source: 'search-query', label: 'Different area' };
+    isAuthenticated = true;
+    mounted.rerender(renderComposer());
+    await act(async () => Promise.resolve());
+    assert.equal(submitCalls, 1, 'authentication must not publish the draft automatically');
+    assert.match(mounted.container.textContent, /You’re signed in/);
+    assert.equal(mounted.container.querySelector('#composer-title-input').value, 'Helpful garden entrance');
+    assert.equal(mounted.container.querySelector('.composer-location-label').textContent, 'Riverside Garden');
+
+    await submit(mounted.container);
+    assert.equal(submitCalls, 2);
+    assert.deepEqual(createdRequest.location, { type: 'unverified', label: 'Riverside Garden' });
+    assert.equal(published, validNote);
+    assert.match(mounted.container.textContent, /Note shared/);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test('cancelled authentication leaves the draft in place and can be reopened', async () => {
+  let authRequests = 0;
+  let submitCalls = 0;
+  const mounted = mount(React.createElement(NoteComposer, {
+    context: placeContext,
+    onAuthenticationRequired: () => { authRequests++; },
+    onClose: () => undefined,
+    actions: {
+      createNoteAttempt: () => ({
+        submit: async () => {
+          submitCalls++;
+          throw new CreateNoteApiError('authentication', 'Your StreetMap session is missing or expired. Sign in and try again.');
+        },
+      }),
+    },
+  }));
+  try {
+    setInput(mounted.container, '#composer-title-input', 'Quiet courtyard entrance');
+    setInput(mounted.container, '#composer-body-input', 'Walk around the north side.');
+    await submit(mounted.container);
+    assert.equal(authRequests, 1);
+
+    mounted.rerender(React.createElement(NoteComposer, {
+      context: placeContext,
+      authPanelOpen: true,
+      onAuthenticationRequired: () => { authRequests++; },
+      onClose: () => undefined,
+      actions: { createNoteAttempt: () => ({ submit: async () => { submitCalls++; throw new Error('unused'); } }) },
+    }));
+    mounted.rerender(React.createElement(NoteComposer, {
+      context: placeContext,
+      authPanelOpen: false,
+      onAuthenticationRequired: () => { authRequests++; },
+      onClose: () => undefined,
+      actions: { createNoteAttempt: () => ({ submit: async () => { submitCalls++; throw new Error('unused'); } }) },
+    }));
+
+    assert.equal(mounted.container.querySelector('#composer-title-input').value, 'Quiet courtyard entrance');
+    assert.equal(mounted.container.querySelector('#composer-body-input').value, 'Walk around the north side.');
+    assert.equal(submitCalls, 1, 'closing the auth panel must not retry the submission');
+    assert.equal(mounted.container.querySelector('button').textContent, '×');
+    const signIn = [...mounted.container.querySelectorAll('button')].find((button) => button.textContent === 'Sign in to publish');
+    assert.ok(signIn);
+    act(() => signIn.click());
+    assert.equal(authRequests, 2);
+    assert.equal(submitCalls, 1);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test('an expired authenticated session opens account recovery without losing the draft', async () => {
+  let authRequests = 0;
+  const mounted = mount(React.createElement(NoteComposer, {
+    context: placeContext,
+    isAuthenticated: true,
+    onAuthenticationRequired: () => { authRequests++; },
+    onClose: () => undefined,
+    actions: {
+      createNoteAttempt: () => ({
+        submit: async () => { throw new CreateNoteApiError('authentication', 'Your StreetMap session is missing or expired. Sign in and try again.'); },
+      }),
+    },
+  }));
+  try {
+    setInput(mounted.container, '#composer-title-input', 'Safer evening entrance');
+    setInput(mounted.container, '#composer-body-input', 'Use the lit entrance after dusk.');
+    await submit(mounted.container);
+    assert.equal(authRequests, 1);
+    assert.match(mounted.container.textContent, /could not verify the current session/);
+    assert.match(mounted.container.textContent, /Sign out in the account panel, then sign in again/);
+    assert.equal(mounted.container.querySelector('#composer-title-input').value, 'Safer evening entrance');
+    assert.equal(mounted.container.querySelector('#composer-body-input').value, 'Use the lit entrance after dusk.');
   } finally {
     mounted.unmount();
   }

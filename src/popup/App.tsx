@@ -20,6 +20,7 @@ export default function App() {
   const [isNoteComposerOpen, setIsNoteComposerOpen] = useState(false);
   const auth = useAuth();
   const closeAuthPanel = useCallback(() => setIsAuthPanelOpen(false), []);
+  const openAuthPanel = useCallback(() => setIsAuthPanelOpen(true), []);
   const closeNoteComposer = useCallback(() => setIsNoteComposerOpen(false), []);
   const {
     locationContext,
@@ -75,7 +76,14 @@ export default function App() {
       />
       {isAuthPanelOpen && <AuthPanel state={auth} onClose={closeAuthPanel} />}
       {isNoteComposerOpen && (
-        <NoteComposer context={locationContext} onClose={closeNoteComposer} onPublished={() => retryNotes()} />
+        <NoteComposer
+          context={locationContext}
+          isAuthenticated={auth.status === 'authenticated'}
+          authPanelOpen={isAuthPanelOpen}
+          onAuthenticationRequired={openAuthPanel}
+          onClose={closeNoteComposer}
+          onPublished={() => retryNotes()}
+        />
       )}
       <LocationContextPanel context={locationContext} onRefresh={refreshLocationContext} />
       <main className="popup-main" id="community-notes">
