@@ -1,7 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import type { LocationContext } from '../shared/locationContext';
 import Header from './components/Header';
-import AuthPanel from './components/AuthPanel';
 import LocationContextPanel from './components/LocationContextPanel';
 import NotesList from './components/NotesList';
 import SearchInput from './components/SearchInput';
@@ -11,7 +10,9 @@ import { useNoteSearch } from './hooks/useNoteSearch';
 import { getActiveLocationContext, subscribeToActiveTabLocationChanges } from './services/locationContext';
 import { fetchPublicNotes } from './services/publicNotes';
 import { useAuth } from './hooks/useAuth';
-import NoteComposer from './components/NoteComposer';
+
+const AuthPanel = lazy(() => import('./components/AuthPanel'));
+const NoteComposer = lazy(() => import('./components/NoteComposer'));
 
 export default function App() {
   const [query, setQuery] = useState('');
@@ -74,16 +75,22 @@ export default function App() {
         accountLabel={auth.status === 'authenticated' ? 'ACCOUNT' : 'SIGN IN'}
         onAccountClick={() => setIsAuthPanelOpen(true)}
       />
-      {isAuthPanelOpen && <AuthPanel state={auth} onClose={closeAuthPanel} />}
+      {isAuthPanelOpen && (
+        <Suspense fallback={null}>
+          <AuthPanel state={auth} onClose={closeAuthPanel} />
+        </Suspense>
+      )}
       {isNoteComposerOpen && (
-        <NoteComposer
-          context={locationContext}
-          isAuthenticated={auth.status === 'authenticated'}
-          authPanelOpen={isAuthPanelOpen}
-          onAuthenticationRequired={openAuthPanel}
-          onClose={closeNoteComposer}
-          onPublished={() => retryNotes()}
-        />
+        <Suspense fallback={null}>
+          <NoteComposer
+            context={locationContext}
+            isAuthenticated={auth.status === 'authenticated'}
+            authPanelOpen={isAuthPanelOpen}
+            onAuthenticationRequired={openAuthPanel}
+            onClose={closeNoteComposer}
+            onPublished={() => retryNotes()}
+          />
+        </Suspense>
       )}
       <LocationContextPanel context={locationContext} onRefresh={refreshLocationContext} />
       <main className="popup-main" id="community-notes">

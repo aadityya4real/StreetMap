@@ -9,7 +9,7 @@ import NoteComposer, {
   getComposerLocation,
   validateComposerFields,
 } from '../src/popup/components/NoteComposer.tsx';
-import { CreateNoteApiError } from '../src/popup/services/createNote.ts';
+import { CreateNoteApiError, createNoteAttempt } from '../src/popup/services/createNote.ts';
 
 const window = new Window();
 globalThis.window = window;
@@ -263,6 +263,78 @@ test('submits only user content and the unverified context, then confirms public
     assert.match(mounted.container.textContent, /published and public/);
   } finally {
     mounted.unmount();
+  }
+});
+
+test('composer, authenticated API client, publication response, and feed-refresh callback work together for supported contexts', async (t) => {
+  const cases = [
+    {
+      name: 'unverified place',
+      context: placeContext,
+      expectedLocation: { type: 'unverified', label: 'Riverside Garden' },
+    },
+    {
+      name: 'broad area',
+      context: { status: 'broad-area', sourceHostname: 'www.google.com', source: 'search-query', label: 'Garden District' },
+      expectedLocation: { type: 'broad', label: 'Garden District' },
+    },
+    {
+      name: 'user-confirmed map-center coordinates',
+      context: { status: 'map-center', sourceHostname: 'www.google.com', mapCenter: { latitude: 28.5, longitude: 77.2 } },
+      expectedLocation: { type: 'coordinates', latitude: 28.5, longitude: 77.2, user_confirmed: true },
+      confirmCoordinates: true,
+    },
+  ];
+
+  for (const item of cases) {
+    await t.test(item.name, async () => {
+      let requestURL;
+      let requestOptions;
+      let feedRefreshes = 0;
+      let published;
+      const mounted = mount(React.createElement(NoteComposer, {
+        context: item.context,
+        onClose: () => undefined,
+        onPublished: (note) => { published = note; feedRefreshes++; },
+        actions: {
+          createNoteAttempt: (request) => createNoteAttempt(request, {
+            getApiBaseUrl: () => 'http://127.0.0.1:8080/api/v1',
+            getAccessToken: async () => 'synthetic-test-access-token',
+            createIdempotencyKey: () => '8bc2b4ce-4277-4139-825d-c559694c8524',
+            fetcher: async (url, options) => {
+              requestURL = url;
+              requestOptions = options;
+              return new globalThis.Response(JSON.stringify({ data: { note: validNote } }), {
+                status: 201,
+                headers: { 'content-type': 'application/json' },
+              });
+            },
+          }),
+        },
+      }));
+
+      try {
+        setInput(mounted.container, '#composer-title-input', 'Helpful local entrance');
+        setInput(mounted.container, '#composer-body-input', 'Follow the public path beside the garden.');
+        if (item.confirmCoordinates) {
+          act(() => mounted.container.querySelector('.composer-coordinate-confirmation input').click());
+        }
+        await submit(mounted.container);
+
+        assert.equal(requestURL.href, 'http://127.0.0.1:8080/api/v1/notes');
+        assert.equal(requestOptions.method, 'POST');
+        assert.equal(requestOptions.headers.Authorization, 'Bearer synthetic-test-access-token');
+        assert.equal(requestOptions.headers['Content-Type'], 'application/json');
+        assert.equal(requestOptions.headers['Idempotency-Key'], '8bc2b4ce-4277-4139-825d-c559694c8524');
+        assert.equal(requestOptions.credentials, 'omit');
+        assert.deepEqual(JSON.parse(requestOptions.body).location, item.expectedLocation);
+        assert.deepEqual(published, validNote);
+        assert.equal(feedRefreshes, 1);
+        assert.match(mounted.container.textContent, /Note shared/);
+      } finally {
+        mounted.unmount();
+      }
+    });
   }
 });
 
