@@ -139,17 +139,30 @@ function serializeCreateNoteRequest(request: CreateNoteRequest): string {
   if (!isNoteCategory(request.category)) {
     throw new CreateNoteApiError('validation', 'Choose a supported note category.', { category: 'Choose a supported category.' });
   }
+  if (!request.location || typeof request.location !== 'object' || typeof request.location.type !== 'string') {
+    throw invalidLocationError();
+  }
 
   let location: Record<string, string | number | boolean>;
   switch (request.location.type) {
     case 'verified':
+      if (!NOTE_ID_PATTERN.test(request.location.location_id)) throw invalidLocationError();
       location = { type: 'verified', location_id: request.location.location_id };
       break;
     case 'unverified':
     case 'broad':
+      if (!isValidLocationLabel(request.location.label)) throw invalidLocationError('location.label');
       location = { type: request.location.type, label: request.location.label };
       break;
     case 'coordinates':
+      if (
+        !Number.isFinite(request.location.latitude) || request.location.latitude < -90 || request.location.latitude > 90 ||
+        !Number.isFinite(request.location.longitude) || request.location.longitude < -180 || request.location.longitude > 180 ||
+        request.location.user_confirmed !== true ||
+        (request.location.label !== undefined && !isValidLocationLabel(request.location.label))
+      ) {
+        throw invalidLocationError();
+      }
       location = {
         type: 'coordinates',
         latitude: request.location.latitude,
@@ -168,6 +181,16 @@ function serializeCreateNoteRequest(request: CreateNoteRequest): string {
     body: request.body,
     category: request.category,
   });
+}
+
+function isValidLocationLabel(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const label = value.trim();
+  return label.length > 0 && Array.from(label).length <= 200 && !/\p{Cc}/u.test(label);
+}
+
+function invalidLocationError(field: 'location' | 'location.label' = 'location'): CreateNoteApiError {
+  return new CreateNoteApiError('validation', 'Review the selected location and try again.', { [field]: 'Review the selected location.' });
 }
 
 function authenticationError(): CreateNoteApiError {

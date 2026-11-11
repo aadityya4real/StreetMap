@@ -116,12 +116,17 @@ test('maps an expired-token response to a clean sign-in-again error', async () =
   });
 });
 
-test('serializes only the selected location contract for verified, broad, and confirmed coordinates', async (t) => {
+test('serializes only the selected location contract for all four backend location types', async (t) => {
   const cases = [
     {
       name: 'verified location',
       location: { type: 'verified', location_id: '00000000-0000-4000-8000-000000000001' },
       expected: { type: 'verified', location_id: '00000000-0000-4000-8000-000000000001' },
+    },
+    {
+      name: 'unverified place label',
+      location: { type: 'unverified', label: 'URL-derived place name' },
+      expected: { type: 'unverified', label: 'URL-derived place name' },
     },
     {
       name: 'broad context',
@@ -147,6 +152,29 @@ test('serializes only the selected location contract for verified, broad, and co
       assert.deepEqual(body.location, item.expected);
       assert.deepEqual(Object.keys(body).sort(), ['body', 'category', 'location', 'title']);
     });
+  }
+});
+
+test('validates location identifiers and requires confirmed valid coordinates before any request', () => {
+  assert.throws(
+    () => createNoteAttempt({ ...request, location: { type: 'verified', location_id: 'ChIJ-not-a-StreetMap-UUID' } }, dependencies()),
+    (error) => error instanceof CreateNoteApiError && error.kind === 'validation' && Boolean(error.fieldErrors.location),
+    'verified IDs must have the backend UUID shape; Google Place IDs are not accepted',
+  );
+
+  for (const location of [
+    { type: 'coordinates', latitude: 28.5, longitude: 77.2 },
+    { type: 'coordinates', latitude: 28.5, longitude: 77.2, user_confirmed: false },
+    { type: 'coordinates', latitude: 91, longitude: 77.2, user_confirmed: true },
+    { type: 'coordinates', latitude: 28.5, longitude: 181, user_confirmed: true },
+    { type: 'broad', label: '' },
+    { type: 'unverified', label: 'x'.repeat(201) },
+    undefined,
+  ]) {
+    assert.throws(
+      () => createNoteAttempt({ ...request, location }, dependencies()),
+      (error) => error instanceof CreateNoteApiError && error.kind === 'validation',
+    );
   }
 });
 

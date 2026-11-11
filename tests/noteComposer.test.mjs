@@ -81,23 +81,39 @@ async function submit(container) {
 
 test('uses only broad labels and unverified place labels as creation contexts', () => {
   const broad = getComposerLocation({ status: 'broad-area', sourceHostname: 'www.google.com', source: 'search-query', label: 'Greater Noida', mapCenter: { latitude: 28.4, longitude: 77.5 } });
-  assert.deepEqual(broad.requestLocation, { type: 'broad', label: 'Greater Noida' });
+  assert.deepEqual(broad.choices.map((choice) => choice.type), ['broad', 'coordinates']);
+  assert.deepEqual(broad.choices[0].requestLocation, { type: 'broad', label: 'Greater Noida' });
   assert.match(broad.details[1], /Map center: 28.4, 77.5/);
 
   const place = getComposerLocation(placeContext);
-  assert.deepEqual(place.requestLocation, { type: 'unverified', label: 'Riverside Garden' });
+  assert.deepEqual(place.choices.map((choice) => choice.type), ['unverified', 'coordinates']);
+  assert.deepEqual(place.choices[0].requestLocation, { type: 'unverified', label: 'Riverside Garden' });
   assert.match(place.details[0], /not been independently verified/);
   assert.match(place.details[1], /not the venue coordinates/);
+  assert.match(place.details.join(' '), /not.*verified/i);
 });
 
 test('does not treat map center or an unresolved place ID as a confirmed creation location', () => {
   const mapCenter = getComposerLocation({ status: 'map-center', sourceHostname: 'www.google.com', mapCenter: { latitude: 28.5, longitude: 77.2 } });
-  assert.equal(mapCenter.requestLocation, null);
+  assert.deepEqual(mapCenter.choices.map((choice) => choice.type), ['coordinates']);
+  assert.equal(mapCenter.choices[0].requestLocation, null);
+  assert.deepEqual(mapCenter.choices[0].coordinates, { latitude: 28.5, longitude: 77.2 });
   assert.match(mapCenter.details[0], /not a selected place/);
 
   const reference = getComposerLocation({ status: 'unverified-place-reference', sourceHostname: 'www.google.com', placeId: 'ChIJsynthetic' });
-  assert.equal(reference.requestLocation, null);
+  assert.deepEqual(reference.choices, []);
   assert.match(reference.details[0], /cannot safely attach/);
+
+  const invalidCenter = getComposerLocation({ status: 'map-center', sourceHostname: 'www.google.com', mapCenter: { latitude: 91, longitude: 77.2 } });
+  assert.deepEqual(invalidCenter.choices, []);
+  const noContext = getComposerLocation({ status: 'maps-no-location', sourceHostname: 'www.google.com' });
+  assert.deepEqual(noContext.choices, []);
+});
+
+test('does not invent a verified StreetMap ID for Google Maps context', () => {
+  const location = getComposerLocation(placeContext);
+  assert.equal(location.choices.some((choice) => choice.type === 'verified'), false);
+  assert.match(location.details.join(' '), /not been independently verified/);
 });
 
 test('validates required fields and backend rune-count limits', () => {
@@ -122,8 +138,73 @@ test('renders an accessible place-aware form with all backend categories', () =>
     assert.match(mounted.container.textContent, /Riverside Garden/);
     assert.match(mounted.container.textContent, /Map center: 28.5, 77.2 \(not the venue coordinates\)/);
     assert.equal(mounted.container.querySelectorAll('#composer-category option').length, 8);
+    assert.equal(mounted.container.querySelectorAll('#composer-location-type option').length, 2);
+    assert.equal(mounted.container.querySelector('#composer-location-type').value, 'unverified');
     assert.equal(mounted.container.querySelector('#composer-title-count').textContent, '0 / 120');
     assert.equal(mounted.container.querySelector('#composer-body-count').textContent, '0 / 5000');
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test('requires explicit confirmation before sending map-center coordinates', async () => {
+  let attempts = 0;
+  let submissions = 0;
+  let authRequests = 0;
+  let isAuthenticated = false;
+  let request;
+  const renderComposer = () => React.createElement(NoteComposer, {
+    context: { status: 'map-center', sourceHostname: 'www.google.com', mapCenter: { latitude: 28.5, longitude: 77.2 } },
+    isAuthenticated,
+    onAuthenticationRequired: () => { authRequests++; },
+    onClose: () => undefined,
+    actions: {
+      createNoteAttempt(value) {
+        attempts++;
+        request = value;
+        return {
+          submit: async () => {
+            submissions++;
+            if (submissions === 1) throw new CreateNoteApiError('authentication', 'Sign in is required.');
+            return { note: validNote, replayed: false };
+          },
+        };
+      },
+    },
+  });
+  const mounted = mount(renderComposer());
+  try {
+    setInput(mounted.container, '#composer-title-input', 'Useful map-center note');
+    setInput(mounted.container, '#composer-body-input', 'The marked point is the right meeting location.');
+    await submit(mounted.container);
+    assert.equal(attempts, 0);
+    assert.match(mounted.container.textContent, /Confirm that you want to use these map-center coordinates/);
+
+    const checkbox = mounted.container.querySelector('.composer-coordinate-confirmation input');
+    assert.ok(checkbox);
+    act(() => {
+      checkbox.click();
+    });
+    await submit(mounted.container);
+    assert.equal(attempts, 1);
+    assert.equal(submissions, 1);
+    assert.equal(authRequests, 1);
+    assert.equal(checkbox.checked, true);
+
+    isAuthenticated = true;
+    mounted.rerender(renderComposer());
+    await act(async () => Promise.resolve());
+    assert.equal(submissions, 1, 'login must not submit the coordinate draft automatically');
+    assert.equal(checkbox.checked, true, 'the explicit coordinate confirmation is part of the in-memory draft');
+    await submit(mounted.container);
+    assert.equal(submissions, 2);
+    assert.deepEqual(request.location, {
+      type: 'coordinates',
+      latitude: 28.5,
+      longitude: 77.2,
+      user_confirmed: true,
+    });
+    assert.match(mounted.container.textContent, /Note shared/);
   } finally {
     mounted.unmount();
   }
@@ -365,17 +446,18 @@ test('an expired authenticated session opens account recovery without losing the
   }
 });
 
-test('shows an unavailable state and no submit action for map-center-only context', () => {
+test('shows map-center coordinates separately and leaves confirmation unchecked by default', () => {
   const mounted = mount(React.createElement(NoteComposer, {
     context: { status: 'map-center', sourceHostname: 'www.google.com', mapCenter: { latitude: 28.5, longitude: 77.2 } },
     onClose: () => undefined,
   }));
   try {
-    assert.match(mounted.container.textContent, /Map center only/);
+    assert.match(mounted.container.textContent, /Map center coordinates/);
     assert.match(mounted.container.textContent, /28.5, 77.2/);
     assert.match(mounted.container.textContent, /not a selected place/);
-    assert.equal(mounted.container.querySelector('form'), null);
-    assert.equal(mounted.container.querySelector('button[type="submit"]'), null);
+    assert.ok(mounted.container.querySelector('form'));
+    assert.equal(mounted.container.querySelector('.composer-coordinate-confirmation input').checked, false);
+    assert.equal(mounted.container.querySelector('button[type="submit"]').disabled, true);
   } finally {
     mounted.unmount();
   }

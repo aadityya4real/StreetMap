@@ -28,9 +28,18 @@ interface NoteComposerProps {
 }
 
 interface ComposerLocation {
-  requestLocation: CreateNoteLocation | null;
+  choices: ComposerLocationChoice[];
   heading: string;
   label?: string;
+  details: string[];
+}
+
+interface ComposerLocationChoice {
+  type: 'unverified' | 'broad' | 'coordinates';
+  label: string;
+  heading: string;
+  requestLocation: Exclude<CreateNoteLocation, { type: 'coordinates' }> | null;
+  coordinates?: { latitude: number; longitude: number };
   details: string[];
 }
 
@@ -38,69 +47,123 @@ const defaultActions: NoteComposerActions = { createNoteAttempt };
 
 export function getComposerLocation(context: LocationContext): ComposerLocation {
   switch (context.status) {
-    case 'broad-area':
+    case 'broad-area': {
+      const center = validMapCenter(context.mapCenter);
+      const details = [
+        'This is a broad search label, not a confirmed selected place.',
+        ...(center ? [`Map center: ${formatCoordinates(center.latitude, center.longitude)} (view center only)`] : []),
+      ];
       return {
-        requestLocation: { type: 'broad', label: context.label },
+        choices: [
+          {
+            type: 'broad',
+            label: context.label,
+            heading: 'Broad area',
+            requestLocation: { type: 'broad', label: context.label },
+            details,
+          },
+          ...(center ? [createCoordinateChoice(center)] : []),
+        ],
         heading: 'Area/search context',
         label: context.label,
-        details: [
-          'This is a broad search label, not a confirmed selected place.',
-          ...(context.mapCenter
-            ? [`Map center: ${formatCoordinates(context.mapCenter.latitude, context.mapCenter.longitude)} (view center only)`]
-            : []),
-        ],
+        details,
       };
-    case 'place-page-unverified':
+    }
+    case 'place-page-unverified': {
+      const center = validMapCenter(context.mapCenter);
+      const details = [
+        'This name comes from the Maps URL and has not been independently verified.',
+        ...(center ? [`Map center: ${formatCoordinates(center.latitude, center.longitude)} (not the venue coordinates)`] : []),
+      ];
       return {
-        requestLocation: { type: 'unverified', label: context.label },
+        choices: [
+          {
+            type: 'unverified',
+            label: context.label,
+            heading: 'Place page detected · unverified',
+            requestLocation: { type: 'unverified', label: context.label },
+            details,
+          },
+          ...(center ? [createCoordinateChoice(center)] : []),
+        ],
         heading: 'Place page detected · unverified',
         label: context.label,
-        details: [
-          'This name comes from the Maps URL and has not been independently verified.',
-          ...(context.mapCenter
-            ? [`Map center: ${formatCoordinates(context.mapCenter.latitude, context.mapCenter.longitude)} (not the venue coordinates)`]
-            : []),
-        ],
+        details,
       };
+    }
     case 'map-center':
+      if (!validMapCenter(context.mapCenter)) {
+        return { choices: [], heading: 'Invalid map center', details: ['Google Maps did not provide usable coordinates.'] };
+      }
       return {
-        requestLocation: null,
+        choices: [createCoordinateChoice(context.mapCenter)],
         heading: 'Map center only',
         label: formatCoordinates(context.mapCenter.latitude, context.mapCenter.longitude),
-        details: ['These coordinates describe the map view, not a selected place. StreetMap cannot submit them as a user-confirmed location.'],
+        details: ['These coordinates describe the map view, not a selected place.'],
       };
     case 'unverified-place-reference':
       return {
-        requestLocation: null,
+        choices: [],
         heading: 'Unresolved place reference',
         label: 'Maps provides a place reference without a readable name.',
         details: ['StreetMap cannot safely attach a note until a readable place or area label is available.'],
       };
     case 'maps-no-location':
       return {
-        requestLocation: null,
+        choices: [],
         heading: 'No usable location context',
         details: ['Select a place page or search for an area in Google Maps, then refresh the context.'],
       };
     case 'maps-unavailable':
       return {
-        requestLocation: null,
+        choices: [],
         heading: 'Google Maps not detected',
         details: ['Open a supported Google Maps page with a place name or area search.'],
       };
     case 'loading':
       return {
-        requestLocation: null,
+        choices: [],
         heading: 'Checking Maps context',
         details: ['Wait for the current tab context to finish loading, then reopen the composer.'],
       };
     case 'error':
       return {
-        requestLocation: null,
+        choices: [],
         heading: 'Location context unavailable',
         details: ['Refresh the Maps context and try again.'],
       };
   }
+}
+
+function createCoordinateChoice(center: { latitude: number; longitude: number }): ComposerLocationChoice {
+  return {
+    type: 'coordinates',
+    label: formatCoordinates(center.latitude, center.longitude),
+    heading: 'Map center coordinates',
+    requestLocation: null,
+    coordinates: center,
+    details: ['These map-center coordinates are not a selected place or verified venue location. Confirm only if this point is appropriate for your note.'],
+  };
+}
+
+function validMapCenter(value: { latitude: number; longitude: number } | undefined): { latitude: number; longitude: number } | null {
+  if (!value || !Number.isFinite(value.latitude) || !Number.isFinite(value.longitude)) return null;
+  if (value.latitude < -90 || value.latitude > 90 || value.longitude < -180 || value.longitude > 180) return null;
+  return value;
+}
+
+function getConfirmedLocation(
+  choice: ComposerLocationChoice,
+  coordinatesConfirmed: boolean,
+): CreateNoteLocation | null {
+  if (choice.type !== 'coordinates') return choice.requestLocation;
+  if (!coordinatesConfirmed || !choice.coordinates) return null;
+  return {
+    type: 'coordinates',
+    latitude: choice.coordinates.latitude,
+    longitude: choice.coordinates.longitude,
+    user_confirmed: true,
+  };
 }
 
 export function countCharacters(value: string): number {
@@ -147,6 +210,12 @@ export default function NoteComposer({
   const [fieldErrors, setFieldErrors] = useState<ComposerFieldErrors>({});
   const [publishedNote, setPublishedNote] = useState<PublicNote | null>(null);
   const [location] = useState(() => getComposerLocation(context));
+  const [selectedLocationType, setSelectedLocationType] = useState<ComposerLocationChoice['type'] | null>(
+    () => location.choices[0]?.type ?? null,
+  );
+  const [coordinatesConfirmed, setCoordinatesConfirmed] = useState(false);
+  const [locationError, setLocationError] = useState('');
+  const selectedLocation = location.choices.find((choice) => choice.type === selectedLocationType) ?? null;
 
   useEffect(() => {
     const becameAuthenticated = !wasAuthenticatedRef.current && isAuthenticated;
@@ -196,13 +265,19 @@ export default function NoteComposer({
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (submitLock.current || !location.requestLocation || publishedNote) return;
+    if (submitLock.current || !selectedLocation || publishedNote) return;
+    const requestLocation = getConfirmedLocation(selectedLocation, coordinatesConfirmed);
+    if (!requestLocation) {
+      setLocationError('Confirm that you want to use these map-center coordinates for this note.');
+      return;
+    }
     setHasSubmitted(true);
     setError('');
+    setLocationError('');
     if (!validate()) return;
 
     const request: CreateNoteRequest = {
-      location: location.requestLocation,
+      location: requestLocation,
       title: title.trim(),
       body: body.trim(),
       category,
@@ -277,7 +352,7 @@ export default function NoteComposer({
             <p>StreetMap is refreshing the notes for this Maps context.</p>
             <button className="auth-submit" type="button" onClick={onClose}>Back to Community Notes</button>
           </div>
-        ) : !location.requestLocation ? (
+        ) : !selectedLocation ? (
           <div className="composer-unavailable" role="status">
             <h3>{location.heading}</h3>
             {location.label && <p className="composer-location-label">{location.label}</p>}
@@ -289,9 +364,47 @@ export default function NoteComposer({
           <form className="composer-form" onSubmit={(event) => void handleSubmit(event)} noValidate>
             <div className="composer-scroll-area">
               <section className="composer-location" aria-label="Note location context">
-                <p className="composer-location-heading">{location.heading}</p>
-                <p className="composer-location-label">{location.label}</p>
-                {location.details.map((detail) => <p className="composer-location-detail" key={detail}>{detail}</p>)}
+                <p className="composer-location-heading">Location for this note</p>
+                {location.choices.length > 1 && (
+                  <>
+                    <label className="auth-label" htmlFor="composer-location-type">Location type</label>
+                    <select
+                      id="composer-location-type"
+                      className="composer-input composer-select"
+                      value={selectedLocation.type}
+                      disabled={busy}
+                      onChange={(event) => {
+                        setSelectedLocationType(event.currentTarget.value as ComposerLocationChoice['type']);
+                        setCoordinatesConfirmed(false);
+                        setLocationError('');
+                        setError('');
+                      }}
+                    >
+                      {location.choices.map((choice) => <option key={choice.type} value={choice.type}>{getLocationChoiceLabel(choice.type)}</option>)}
+                    </select>
+                  </>
+                )}
+                <p className="composer-location-heading composer-location-type-label">{selectedLocation.heading}</p>
+                <p className="composer-location-label">{selectedLocation.label}</p>
+                {selectedLocation.details.map((detail) => <p className="composer-location-detail" key={detail}>{detail}</p>)}
+                {selectedLocation.type === 'coordinates' && (
+                  <label className="composer-coordinate-confirmation">
+                    <input
+                      type="checkbox"
+                      checked={coordinatesConfirmed}
+                      disabled={busy}
+                      onChange={(event) => {
+                        setCoordinatesConfirmed(event.currentTarget.checked);
+                        setLocationError('');
+                      }}
+                    />
+                    <span>I confirm these map-center coordinates are the location I want to use for this note.</span>
+                  </label>
+                )}
+                {locationError && <p className="composer-field-error" role="alert">{locationError}</p>}
+                {selectedLocation.type !== 'coordinates' && (
+                  <p className="composer-location-detail">Verified StreetMap place selection is unavailable here. Maps labels are not verified StreetMap location IDs.</p>
+                )}
               </section>
 
               <label className="auth-label" htmlFor="composer-title-input">Title</label>
@@ -359,7 +472,11 @@ export default function NoteComposer({
             )}
             <div className="composer-actions">
               <button className="auth-secondary-button" type="button" onClick={onClose} disabled={busy}>Cancel</button>
-              <button className="auth-submit" type="submit" disabled={busy}>
+              <button
+                className="auth-submit"
+                type="submit"
+                disabled={busy || (selectedLocation.type === 'coordinates' && !coordinatesConfirmed)}
+              >
                 {busy ? 'Sharing note…' : 'Share note'}
               </button>
             </div>
@@ -372,4 +489,12 @@ export default function NoteComposer({
 
 function formatCoordinates(latitude: number, longitude: number): string {
   return `${latitude}, ${longitude}`;
+}
+
+function getLocationChoiceLabel(type: ComposerLocationChoice['type']): string {
+  switch (type) {
+    case 'unverified': return 'Place page name (unverified)';
+    case 'broad': return 'Broad area';
+    case 'coordinates': return 'Map-center coordinates';
+  }
 }
