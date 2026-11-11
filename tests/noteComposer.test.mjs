@@ -1,0 +1,241 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { Window } from 'happy-dom';
+import React, { act } from 'react';
+import { createRoot } from 'react-dom/client';
+
+import NoteComposer, {
+  countCharacters,
+  getComposerLocation,
+  validateComposerFields,
+} from '../src/popup/components/NoteComposer.tsx';
+import { CreateNoteApiError } from '../src/popup/services/createNote.ts';
+
+const window = new Window();
+globalThis.window = window;
+globalThis.document = window.document;
+globalThis.HTMLElement = window.HTMLElement;
+globalThis.MouseEvent = window.MouseEvent;
+Object.defineProperty(globalThis, 'navigator', { value: window.navigator, configurable: true });
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+
+const validNote = {
+  id: '8bc2b4ce-4277-4139-825d-c559694c8524',
+  title: 'A useful local note',
+  body: 'A detailed local note description.',
+  category: 'local_tip',
+  author: { display_name: 'StreetMap member' },
+  created_at: '2026-11-12T08:30:00Z',
+  helpful_vote_count: 0,
+  match: { type: 'unverified_reference_label', location_label: 'Riverside Garden' },
+};
+
+const placeContext = {
+  status: 'place-page-unverified',
+  sourceHostname: 'www.google.com',
+  label: 'Riverside Garden',
+  mapCenter: { latitude: 28.5, longitude: 77.2 },
+};
+
+function mount(element) {
+  const container = globalThis.document.createElement('div');
+  globalThis.document.body.append(container);
+  const root = createRoot(container);
+  act(() => root.render(element));
+  return {
+    container,
+    unmount() {
+      act(() => root.unmount());
+      container.remove();
+    },
+  };
+}
+
+function setInput(container, selector, value) {
+  const input = container.querySelector(selector);
+  assert.ok(input, `expected input ${selector}`);
+  const prototype = input instanceof window.HTMLTextAreaElement
+    ? window.HTMLTextAreaElement.prototype
+    : window.HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(prototype, 'value').set;
+  act(() => {
+    input._valueTracker?.setValue(input.value);
+    setter.call(input, value);
+    input.dispatchEvent(new window.Event('input', { bubbles: true }));
+    input.dispatchEvent(new window.Event('change', { bubbles: true }));
+  });
+  return input;
+}
+
+async function submit(container) {
+  const form = container.querySelector('form');
+  assert.ok(form);
+  await act(async () => {
+    form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+    await Promise.resolve();
+  });
+}
+
+test('uses only broad labels and unverified place labels as creation contexts', () => {
+  const broad = getComposerLocation({ status: 'broad-area', sourceHostname: 'www.google.com', source: 'search-query', label: 'Greater Noida', mapCenter: { latitude: 28.4, longitude: 77.5 } });
+  assert.deepEqual(broad.requestLocation, { type: 'broad', label: 'Greater Noida' });
+  assert.match(broad.details[1], /Map center: 28.4, 77.5/);
+
+  const place = getComposerLocation(placeContext);
+  assert.deepEqual(place.requestLocation, { type: 'unverified', label: 'Riverside Garden' });
+  assert.match(place.details[0], /not been independently verified/);
+  assert.match(place.details[1], /not the venue coordinates/);
+});
+
+test('does not treat map center or an unresolved place ID as a confirmed creation location', () => {
+  const mapCenter = getComposerLocation({ status: 'map-center', sourceHostname: 'www.google.com', mapCenter: { latitude: 28.5, longitude: 77.2 } });
+  assert.equal(mapCenter.requestLocation, null);
+  assert.match(mapCenter.details[0], /not a selected place/);
+
+  const reference = getComposerLocation({ status: 'unverified-place-reference', sourceHostname: 'www.google.com', placeId: 'ChIJsynthetic' });
+  assert.equal(reference.requestLocation, null);
+  assert.match(reference.details[0], /cannot safely attach/);
+});
+
+test('validates required fields and backend rune-count limits', () => {
+  assert.deepEqual(validateComposerFields('', '', 'local_tip'), {
+    title: 'Enter a title with at least 3 characters.',
+    body: 'Add a description of the local knowledge.',
+  });
+  assert.equal(validateComposerFields('A good title', 'Description', 'other').title, undefined);
+  assert.match(validateComposerFields('a'.repeat(121), 'Description', 'other').title, /120 characters/);
+  assert.match(validateComposerFields('A good title', 'x'.repeat(5001), 'other').body, /5,000 characters/);
+  assert.equal(countCharacters('😀'.repeat(120)), 120);
+  assert.equal(validateComposerFields('😀'.repeat(120), '😀', 'safety').title, undefined);
+});
+
+test('renders an accessible place-aware form with all backend categories', () => {
+  const mounted = mount(React.createElement(NoteComposer, { context: placeContext, onClose: () => undefined }));
+  try {
+    assert.equal(mounted.container.querySelector('[role="dialog"]').getAttribute('aria-modal'), 'true');
+    assert.equal(mounted.container.querySelector('label[for="composer-title-input"]').textContent, 'Title');
+    assert.equal(mounted.container.querySelector('label[for="composer-body-input"]').textContent, 'Description');
+    assert.equal(mounted.container.querySelector('label[for="composer-category"]').textContent, 'Category');
+    assert.match(mounted.container.textContent, /Riverside Garden/);
+    assert.match(mounted.container.textContent, /Map center: 28.5, 77.2 \(not the venue coordinates\)/);
+    assert.equal(mounted.container.querySelectorAll('#composer-category option').length, 8);
+    assert.equal(mounted.container.querySelector('#composer-title-count').textContent, '0 / 120');
+    assert.equal(mounted.container.querySelector('#composer-body-count').textContent, '0 / 5000');
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test('shows inline validation and does not create an attempt for empty fields', async () => {
+  let attempts = 0;
+  const mounted = mount(React.createElement(NoteComposer, {
+    context: placeContext,
+    onClose: () => undefined,
+    actions: { createNoteAttempt: () => { attempts++; throw new Error('must not submit'); } },
+  }));
+  try {
+    await submit(mounted.container);
+    assert.match(mounted.container.textContent, /Enter a title with at least 3 characters/);
+    assert.match(mounted.container.textContent, /Add a description of the local knowledge/);
+    assert.equal(attempts, 0);
+    assert.equal(mounted.container.querySelector('#composer-title-input').getAttribute('aria-invalid'), 'true');
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test('submits only user content and the unverified context, then confirms publication', async () => {
+  let submittedRequest;
+  let published;
+  const mounted = mount(React.createElement(NoteComposer, {
+    context: placeContext,
+    onClose: () => undefined,
+    onPublished: (note) => { published = note; },
+    actions: {
+      createNoteAttempt(request) {
+        submittedRequest = request;
+        return { submit: async () => ({ note: validNote, replayed: false }) };
+      },
+    },
+  }));
+  try {
+    setInput(mounted.container, '#composer-title-input', 'Helpful garden entrance');
+    setInput(mounted.container, '#composer-body-input', 'Use the public path along the east wall.');
+    assert.equal(mounted.container.querySelector('#composer-title-count').textContent, '23 / 120');
+    assert.equal(mounted.container.querySelector('#composer-body-count').textContent, '40 / 5000');
+    await submit(mounted.container);
+
+    assert.deepEqual(submittedRequest, {
+      location: { type: 'unverified', label: 'Riverside Garden' },
+      title: 'Helpful garden entrance',
+      body: 'Use the public path along the east wall.',
+      category: 'local_tip',
+    });
+    assert.equal('author_user_id' in submittedRequest, false);
+    assert.equal('status' in submittedRequest, false);
+    assert.equal('latitude' in submittedRequest.location, false);
+    assert.equal(published, validNote);
+    assert.match(mounted.container.textContent, /Note shared/);
+    assert.match(mounted.container.textContent, /published and public/);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test('disables duplicate submissions while pending and shows safe API errors', async () => {
+  let releaseSubmit;
+  let submitted = 0;
+  const pending = new Promise((resolve) => { releaseSubmit = resolve; });
+  const mounted = mount(React.createElement(NoteComposer, {
+    context: placeContext,
+    onClose: () => undefined,
+    actions: {
+      createNoteAttempt: () => ({
+        submit: async () => {
+          submitted++;
+          await pending;
+          throw new CreateNoteApiError('authentication', 'Your StreetMap session is missing or expired. Sign in and try again.');
+        },
+      }),
+    },
+  }));
+  try {
+    setInput(mounted.container, '#composer-title-input', 'Helpful garden entrance');
+    setInput(mounted.container, '#composer-body-input', 'Use the public path along the east wall.');
+    const form = mounted.container.querySelector('form');
+    let submission;
+    await act(async () => {
+      form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+      submission = Promise.resolve();
+    });
+    assert.equal(mounted.container.querySelector('button[type="submit"]').disabled, true);
+    assert.equal(mounted.container.querySelector('button[type="submit"]').textContent, 'Sharing note…');
+    assert.equal(submitted, 1);
+    await act(async () => {
+      releaseSubmit();
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    });
+    await submission;
+    assert.match(mounted.container.textContent, /session is missing or expired/);
+    assert.equal(mounted.container.querySelector('button[type="submit"]').disabled, false);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test('shows an unavailable state and no submit action for map-center-only context', () => {
+  const mounted = mount(React.createElement(NoteComposer, {
+    context: { status: 'map-center', sourceHostname: 'www.google.com', mapCenter: { latitude: 28.5, longitude: 77.2 } },
+    onClose: () => undefined,
+  }));
+  try {
+    assert.match(mounted.container.textContent, /Map center only/);
+    assert.match(mounted.container.textContent, /28.5, 77.2/);
+    assert.match(mounted.container.textContent, /not a selected place/);
+    assert.equal(mounted.container.querySelector('form'), null);
+    assert.equal(mounted.container.querySelector('button[type="submit"]'), null);
+  } finally {
+    mounted.unmount();
+  }
+});

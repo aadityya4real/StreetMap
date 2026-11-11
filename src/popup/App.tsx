@@ -11,14 +11,16 @@ import { useNoteSearch } from './hooks/useNoteSearch';
 import { getActiveLocationContext, subscribeToActiveTabLocationChanges } from './services/locationContext';
 import { fetchPublicNotes } from './services/publicNotes';
 import { useAuth } from './hooks/useAuth';
+import NoteComposer from './components/NoteComposer';
 
 export default function App() {
   const [query, setQuery] = useState('');
   const [isSearchExpanded, setIsSearchExpanded] = useState(false);
-  const [shareMessage, setShareMessage] = useState('');
   const [isAuthPanelOpen, setIsAuthPanelOpen] = useState(false);
+  const [isNoteComposerOpen, setIsNoteComposerOpen] = useState(false);
   const auth = useAuth();
   const closeAuthPanel = useCallback(() => setIsAuthPanelOpen(false), []);
+  const closeNoteComposer = useCallback(() => setIsNoteComposerOpen(false), []);
   const {
     locationContext,
     notesState,
@@ -72,6 +74,9 @@ export default function App() {
         onAccountClick={() => setIsAuthPanelOpen(true)}
       />
       {isAuthPanelOpen && <AuthPanel state={auth} onClose={closeAuthPanel} />}
+      {isNoteComposerOpen && (
+        <NoteComposer context={locationContext} onClose={closeNoteComposer} onPublished={() => retryNotes()} />
+      )}
       <LocationContextPanel context={locationContext} onRefresh={refreshLocationContext} />
       <main className="popup-main" id="community-notes">
         <div className="section-heading">
@@ -129,14 +134,13 @@ export default function App() {
         <button
           className="share-button"
           type="button"
-          onClick={() => setShareMessage('Note sharing will be available in a future update.')}
+          onClick={() => setIsNoteComposerOpen(true)}
         >
           <svg aria-hidden="true" viewBox="0 0 20 20" fill="none">
             <path d="M10 4v12M4 10h12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
           </svg>
           Share a local secret
         </button>
-        <p className="share-message" role="status" aria-live="polite">{shareMessage}</p>
         <div className="footer-caption">
           <span>GOOD TO KNOW, WHEREVER YOU GO.</span>
           <span className="footer-pin" aria-hidden="true">●</span>
