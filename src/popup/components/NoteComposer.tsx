@@ -302,10 +302,13 @@ export default function NoteComposer({
       if (cause instanceof CreateNoteApiError) {
         if (cause.kind === 'authentication') {
           setAuthenticationRequired(true);
+          const diagnosticReference = cause.diagnosticCode
+            ? ` (Reference: ${cause.diagnosticCode})`
+            : '';
           setError(
             isAuthenticated
-              ? 'StreetMap could not verify the current session. Sign out in the account panel, then sign in again. Your draft is still here.'
-              : 'Sign in to publish this note. Your draft will stay here, and you can review it before publishing.',
+              ? `StreetMap could not verify the current session. Sign out in the account panel, then sign in again. Your draft is still here.${diagnosticReference}`
+              : `Sign in to publish this note. Your draft will stay here, and you can review it before publishing.${diagnosticReference}`,
           );
           onAuthenticationRequired?.();
         } else {

@@ -20,7 +20,9 @@ export default defineConfig({
   modules: [],
   dev: {
     server: {
-      port: 3000,
+      host: '127.0.0.1',
+      port: 3002,
+      origin: 'http://127.0.0.1:3002',
       strictPort: true,
     },
   },

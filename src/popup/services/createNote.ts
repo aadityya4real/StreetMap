@@ -24,6 +24,8 @@ export interface CreateNoteResult {
 
 export type CreateNoteFailureKind =
   | 'authentication'
+  | 'authentication-provider-unavailable'
+  | 'authentication-unavailable'
   | 'configuration'
   | 'validation'
   | 'rate-limited'
@@ -34,6 +36,22 @@ export type CreateNoteFailureKind =
   | 'server'
   | 'invalid-response';
 
+export type CreateNoteDiagnosticCode =
+  | 'AUTH_SESSION_MISSING'
+  | 'SUPABASE_SESSION_REFRESH_FAILED'
+  | 'NOTE_REQUEST_ABORTED'
+  | 'HTTP_401_UNAUTHORIZED'
+  | 'HTTP_403_ACCOUNT_UNAVAILABLE'
+  | 'HTTP_404_LOCATION_NOT_FOUND'
+  | 'HTTP_409_IDEMPOTENCY_CONFLICT'
+  | 'HTTP_429_RATE_LIMITED'
+  | 'HTTP_503_AUTHENTICATION_UNAVAILABLE'
+  | 'HTTP_SERVER_ERROR'
+  | 'HTTP_REQUEST_REJECTED'
+  | 'API_UNREACHABLE_OR_PERMISSION'
+  | 'NOTE_REQUEST_REJECTED_API_RESPONDS'
+  | 'API_HEALTH_CHECK_FAILED';
+
 export type CreateNoteField = 'location' | 'location.type' | 'location.label' | 'location.latitude' | 'location.longitude' | 'title' | 'body' | 'category';
 
 export class CreateNoteApiError extends Error {
@@ -42,8 +60,10 @@ export class CreateNoteApiError extends Error {
     message: string,
     readonly fieldErrors?: Partial<Record<CreateNoteField, string>>,
     readonly retryAfterSeconds?: number,
+    readonly diagnosticCode?: CreateNoteDiagnosticCode,
+    cause?: unknown,
   ) {
-    super(message);
+    super(message, cause === undefined ? undefined : { cause });
     this.name = 'CreateNoteApiError';
   }
 }
@@ -62,7 +82,7 @@ export interface CreateNoteDependencies {
 const defaultDependencies: CreateNoteDependencies = {
   getApiBaseUrl: () => getApiBaseUrl(import.meta.env.DEV),
   getAccessToken: getCurrentAccessToken,
-  fetcher: fetch,
+  fetcher: (input, init) => globalThis.fetch(input, init),
   createIdempotencyKey: () => globalThis.crypto.randomUUID(),
 };
 
@@ -85,7 +105,13 @@ export function createNoteAttempt(
       try {
         accessToken = await resolved.getAccessToken();
       } catch {
-        throw authenticationError();
+        throw new CreateNoteApiError(
+          'authentication-provider-unavailable',
+          'StreetMap could not refresh your session with Supabase. Check your connection and retry; no note request was sent. (Reference: SUPABASE_SESSION_REFRESH_FAILED)',
+          undefined,
+          undefined,
+          'SUPABASE_SESSION_REFRESH_FAILED',
+        );
       }
       if (!accessToken) throw authenticationError();
 
@@ -104,8 +130,8 @@ export function createNoteAttempt(
           body,
           signal,
         });
-      } catch {
-        throw new CreateNoteApiError('network', 'StreetMap could not reach the notes service. Check your connection and retry.');
+      } catch (error) {
+        throw await diagnoseRejectedNoteRequest(resolved.fetcher, apiBaseUrl, signal, error);
       }
 
       if (response.status !== 200 && response.status !== 201) {
@@ -194,7 +220,13 @@ function invalidLocationError(field: 'location' | 'location.label' = 'location')
 }
 
 function authenticationError(): CreateNoteApiError {
-  return new CreateNoteApiError('authentication', 'Your StreetMap session is missing or expired. Sign in and try again.');
+  return new CreateNoteApiError(
+    'authentication',
+    'Your StreetMap session is missing or expired. Sign in and try again. (Reference: AUTH_SESSION_MISSING)',
+    undefined,
+    undefined,
+    'AUTH_SESSION_MISSING',
+  );
 }
 
 async function parseCreateNoteError(response: Response): Promise<CreateNoteApiError> {
@@ -211,32 +243,140 @@ async function parseCreateNoteError(response: Response): Promise<CreateNoteApiEr
   }
 
   if (response.status === 401 || errorCode === 'unauthorized') {
-    return authenticationError();
+    return new CreateNoteApiError(
+      'authentication',
+      'The API rejected the StreetMap session. Sign in again and retry. (Reference: HTTP_401_UNAUTHORIZED)',
+      undefined,
+      undefined,
+      'HTTP_401_UNAUTHORIZED',
+    );
   }
   if (response.status === 403 || errorCode === 'account_unavailable') {
-    return new CreateNoteApiError('account-unavailable', 'This StreetMap account cannot share notes right now.');
+    return new CreateNoteApiError(
+      'account-unavailable',
+      'This StreetMap account cannot share notes right now. (Reference: HTTP_403_ACCOUNT_UNAVAILABLE)',
+      undefined,
+      undefined,
+      'HTTP_403_ACCOUNT_UNAVAILABLE',
+    );
   }
   if (response.status === 404 || errorCode === 'location_not_found') {
-    return new CreateNoteApiError('location-not-found', 'The selected StreetMap location could not be found. Refresh the location and try again.');
+    return new CreateNoteApiError(
+      'location-not-found',
+      'The selected StreetMap location could not be found. Refresh the location and try again. (Reference: HTTP_404_LOCATION_NOT_FOUND)',
+      undefined,
+      undefined,
+      'HTTP_404_LOCATION_NOT_FOUND',
+    );
   }
   if (response.status === 409 || errorCode === 'idempotency_conflict') {
-    return new CreateNoteApiError('conflict', 'This submission conflicts with an earlier request. Start a new note submission to continue.');
+    return new CreateNoteApiError(
+      'conflict',
+      'This submission conflicts with an earlier request. Start a new note submission to continue. (Reference: HTTP_409_IDEMPOTENCY_CONFLICT)',
+      undefined,
+      undefined,
+      'HTTP_409_IDEMPOTENCY_CONFLICT',
+    );
   }
   if (response.status === 429 || errorCode === 'note_creation_rate_limited') {
     return new CreateNoteApiError(
       'rate-limited',
-      'You have shared notes recently. Please wait before trying again.',
+      'You have shared notes recently. Please wait before trying again. (Reference: HTTP_429_RATE_LIMITED)',
       undefined,
       parseRetryAfter(response.headers.get('retry-after')),
+      'HTTP_429_RATE_LIMITED',
     );
   }
   if (response.status === 400 || errorCode === 'validation_error') {
     return new CreateNoteApiError('validation', 'Review the note details and try again.', safeFieldErrors(fields));
   }
-  if (response.status >= 500) {
-    return new CreateNoteApiError('server', 'StreetMap could not save this note right now. Please try again.');
+  if (response.status === 503 && errorCode === 'authentication_unavailable') {
+    return new CreateNoteApiError(
+      'authentication-unavailable',
+      'The API is running, but authenticated note publishing is not configured. Start the local API with its Supabase JWT verification settings, then retry. Your draft is still here. (Reference: HTTP_503_AUTHENTICATION_UNAVAILABLE)',
+      undefined,
+      undefined,
+      'HTTP_503_AUTHENTICATION_UNAVAILABLE',
+    );
   }
-  return new CreateNoteApiError('server', 'StreetMap could not complete this note request. Please try again.');
+  if (response.status >= 500) {
+    return new CreateNoteApiError(
+      'server',
+      `StreetMap could not save this note right now. Please try again. (Reference: HTTP_SERVER_ERROR; status ${response.status})`,
+      undefined,
+      undefined,
+      'HTTP_SERVER_ERROR',
+    );
+  }
+  return new CreateNoteApiError(
+    'server',
+    `StreetMap could not complete this note request. Please try again. (Reference: HTTP_REQUEST_REJECTED; status ${response.status})`,
+    undefined,
+    undefined,
+    'HTTP_REQUEST_REJECTED',
+  );
+}
+
+async function diagnoseRejectedNoteRequest(
+  fetcher: typeof fetch,
+  apiBaseUrl: string,
+  requestSignal?: AbortSignal,
+  originalFetchError?: unknown,
+): Promise<CreateNoteApiError> {
+  if (requestSignal?.aborted) {
+    return new CreateNoteApiError(
+      'network',
+      'The note request was interrupted. Check the public notes feed before retrying; the API may have received it. (Reference: NOTE_REQUEST_ABORTED)',
+      undefined,
+      undefined,
+      'NOTE_REQUEST_ABORTED',
+      originalFetchError,
+    );
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 2500);
+  const abortProbe = () => controller.abort();
+  requestSignal?.addEventListener('abort', abortProbe, { once: true });
+  try {
+    const response = await fetcher(new URL(`${apiBaseUrl.replace(/\/$/, '')}/health`), {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      credentials: 'omit',
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+    if (response.ok) {
+      return new CreateNoteApiError(
+        'network',
+        'The API is responding, but Chrome could not expose the note-submission response. Check the development CORS policy for this extension origin and Chrome’s extension errors, then retry. (Reference: NOTE_REQUEST_REJECTED_API_RESPONDS)',
+        undefined,
+        undefined,
+        'NOTE_REQUEST_REJECTED_API_RESPONDS',
+        originalFetchError,
+      );
+    }
+    return new CreateNoteApiError(
+      'network',
+      `The API responded to its health check with HTTP ${response.status}, but the note request did not return a response. Check the local API and extension permission, then retry. (Reference: API_HEALTH_CHECK_FAILED)`,
+      undefined,
+      undefined,
+      'API_HEALTH_CHECK_FAILED',
+      originalFetchError,
+    );
+  } catch {
+    return new CreateNoteApiError(
+      'network',
+      'StreetMap could not reach its API health endpoint. Confirm the local API is running and reload the development extension with its API host permission. (Reference: API_UNREACHABLE_OR_PERMISSION)',
+      undefined,
+      undefined,
+      'API_UNREACHABLE_OR_PERMISSION',
+      originalFetchError,
+    );
+  } finally {
+    clearTimeout(timeout);
+    requestSignal?.removeEventListener('abort', abortProbe);
+  }
 }
 
 function safeFieldErrors(fields?: Record<string, unknown>): Partial<Record<CreateNoteField, string>> | undefined {

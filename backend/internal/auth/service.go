@@ -1,6 +1,9 @@
 package auth
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 type Identity struct {
 	Issuer      string
@@ -30,8 +33,11 @@ func NewService(verifier TokenVerifier, resolver IdentityResolver) *Service {
 }
 
 func (s *Service) Authenticate(ctx context.Context, rawToken string) (Principal, error) {
-	if s == nil || s.verifier == nil || s.resolver == nil {
+	if s == nil || s.verifier == nil {
 		return Principal{}, ErrUnavailable
+	}
+	if s.resolver == nil {
+		return Principal{}, withReason(ReasonIdentityResolverUnavailable, ErrUnavailable)
 	}
 	identity, err := s.verifier.Verify(ctx, rawToken)
 	if err != nil {
@@ -39,7 +45,10 @@ func (s *Service) Authenticate(ctx context.Context, rawToken string) (Principal,
 	}
 	principal, err := s.resolver.Resolve(ctx, identity)
 	if err != nil {
-		return Principal{}, err
+		if errors.Is(err, ErrAccountUnavailable) {
+			return Principal{}, withReason(ReasonAccountUnavailable, ErrAccountUnavailable)
+		}
+		return Principal{}, withReason(ReasonIdentityResolverUnavailable, ErrUnavailable)
 	}
 	return principal, nil
 }

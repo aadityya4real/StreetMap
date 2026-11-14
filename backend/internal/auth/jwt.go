@@ -85,7 +85,7 @@ func validateProjectIssuer(projectURL, issuer string) error {
 
 func (v *Verifier) Verify(ctx context.Context, rawToken string) (Identity, error) {
 	if v == nil || v.keys == nil || strings.TrimSpace(rawToken) == "" || len(rawToken) > 16*1024 {
-		return Identity{}, ErrInvalidToken
+		return Identity{}, withReason(ReasonInvalidJWTStructure, ErrInvalidToken)
 	}
 	claims := &supabaseClaims{}
 	parsed, err := jwt.ParseWithClaims(
@@ -93,11 +93,11 @@ func (v *Verifier) Verify(ctx context.Context, rawToken string) (Identity, error
 		claims,
 		func(token *jwt.Token) (any, error) {
 			if token.Method.Alg() != v.algorithm {
-				return nil, ErrInvalidToken
+				return nil, withReason(ReasonUnsupportedAlgorithm, ErrInvalidToken)
 			}
 			keyID, ok := token.Header["kid"].(string)
 			if !ok || keyID == "" || len(keyID) > 256 {
-				return nil, ErrInvalidToken
+				return nil, withReason(ReasonMissingKeyID, ErrInvalidToken)
 			}
 			return v.keys.key(ctx, keyID)
 		},
@@ -109,25 +109,72 @@ func (v *Verifier) Verify(ctx context.Context, rawToken string) (Identity, error
 		jwt.WithLeeway(v.clockSkew),
 	)
 	if err != nil {
-		if errors.Is(err, ErrUnavailable) {
-			return Identity{}, ErrUnavailable
+		if algorithm, ok := parsedHeaderAlgorithm(parsed); ok && algorithm != v.algorithm {
+			return Identity{}, withReason(ReasonUnsupportedAlgorithm, ErrInvalidToken)
 		}
-		return Identity{}, ErrInvalidToken
+		if _, ok := diagnosticReason(err); ok {
+			return Identity{}, err
+		}
+		reason := jwtFailureReason(err)
+		if errors.Is(err, ErrUnavailable) {
+			return Identity{}, withReason(reason, ErrUnavailable)
+		}
+		return Identity{}, withReason(reason, ErrInvalidToken)
 	}
-	if parsed == nil || !parsed.Valid || len(claims.Audience) != 1 || claims.Audience[0] != v.audience || claims.Subject == "" || len(claims.Subject) > 255 || strings.TrimSpace(claims.Subject) != claims.Subject || !validClaimText(claims.Subject) {
-		return Identity{}, ErrInvalidToken
+	if parsed == nil || !parsed.Valid {
+		return Identity{}, withReason(ReasonInvalidJWTStructure, ErrInvalidToken)
+	}
+	if len(claims.Audience) != 1 || claims.Audience[0] != v.audience {
+		return Identity{}, withReason(ReasonInvalidAudience, ErrInvalidToken)
+	}
+	if claims.Subject == "" || len(claims.Subject) > 255 || strings.TrimSpace(claims.Subject) != claims.Subject || !validClaimText(claims.Subject) {
+		return Identity{}, withReason(ReasonInvalidSubject, ErrInvalidToken)
 	}
 	// Supabase's access-token role and anonymous flag distinguish an authenticated
 	// access token from an ID token or anonymous token. This is token-shape
 	// validation only; StreetMap authorization never trusts provider roles.
-	if claims.Role != "authenticated" || claims.IsAnonymous == nil || *claims.IsAnonymous {
-		return Identity{}, ErrInvalidToken
+	if claims.Role != "authenticated" {
+		return Identity{}, withReason(ReasonInvalidRole, ErrInvalidToken)
+	}
+	if claims.IsAnonymous == nil || *claims.IsAnonymous {
+		return Identity{}, withReason(ReasonInvalidAnonymousStatus, ErrInvalidToken)
 	}
 	return Identity{
 		Issuer:      claims.Issuer,
 		Subject:     claims.Subject,
 		DisplayName: validatedDisplayName(claims.UserMetadata),
 	}, nil
+}
+
+func parsedHeaderAlgorithm(token *jwt.Token) (string, bool) {
+	if token == nil || token.Header == nil {
+		return "", false
+	}
+	algorithm, ok := token.Header["alg"].(string)
+	return algorithm, ok && algorithm != ""
+}
+
+func jwtFailureReason(err error) ReasonCode {
+	switch {
+	case errors.Is(err, jwt.ErrTokenInvalidIssuer):
+		return ReasonInvalidIssuer
+	case errors.Is(err, jwt.ErrTokenInvalidAudience):
+		return ReasonInvalidAudience
+	case errors.Is(err, jwt.ErrTokenExpired):
+		return ReasonExpiredToken
+	case errors.Is(err, jwt.ErrTokenUsedBeforeIssued):
+		return ReasonInvalidIssuedAt
+	case errors.Is(err, jwt.ErrTokenNotValidYet):
+		return ReasonInvalidNotBefore
+	case errors.Is(err, jwt.ErrTokenSignatureInvalid):
+		return ReasonInvalidSignature
+	case errors.Is(err, jwt.ErrTokenInvalidSubject):
+		return ReasonInvalidSubject
+	case errors.Is(err, jwt.ErrTokenMalformed), errors.Is(err, jwt.ErrTokenRequiredClaimMissing), errors.Is(err, jwt.ErrTokenInvalidClaims), errors.Is(err, jwt.ErrTokenUnverifiable):
+		return ReasonInvalidJWTStructure
+	default:
+		return ReasonInvalidJWTStructure
+	}
 }
 
 func validatedDisplayName(metadata map[string]any) string {

@@ -202,7 +202,7 @@ func ValidateSupabaseProjectURL(projectURL string) error {
 
 func (c *jwksCache) key(ctx context.Context, keyID string) (crypto.PublicKey, error) {
 	if keyID == "" {
-		return nil, ErrInvalidToken
+		return nil, withReason(ReasonMissingKeyID, ErrInvalidToken)
 	}
 	now := time.Now()
 	c.mu.RLock()
@@ -231,16 +231,16 @@ func (c *jwksCache) key(ctx context.Context, keyID string) (crypto.PublicKey, er
 		case <-inFlight:
 			return c.cachedKeyAfterRefresh(keyID)
 		case <-wait.Done():
-			return nil, ErrUnavailable
+			return nil, withReason(ReasonJWKSUnavailable, ErrUnavailable)
 		}
 	}
 	if !c.lastAttempt.IsZero() && now.Sub(c.lastAttempt) < c.refreshGap {
 		fresh := now.Before(c.expiresAt)
 		c.mu.Unlock()
 		if fresh {
-			return nil, ErrInvalidToken
+			return nil, withReason(ReasonUnknownSigningKey, ErrInvalidToken)
 		}
-		return nil, ErrUnavailable
+		return nil, withReason(ReasonJWKSUnavailable, ErrUnavailable)
 	}
 	inFlight := make(chan struct{})
 	c.refreshing = inFlight
@@ -253,7 +253,7 @@ func (c *jwksCache) key(ctx context.Context, keyID string) (crypto.PublicKey, er
 	close(inFlight)
 	c.mu.Unlock()
 	if err != nil {
-		return nil, err
+		return nil, withReason(ReasonJWKSUnavailable, ErrUnavailable)
 	}
 	return c.cachedKeyAfterRefresh(keyID)
 }
@@ -262,12 +262,12 @@ func (c *jwksCache) cachedKeyAfterRefresh(keyID string) (crypto.PublicKey, error
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if !time.Now().Before(c.expiresAt) {
-		return nil, ErrUnavailable
+		return nil, withReason(ReasonJWKSUnavailable, ErrUnavailable)
 	}
 	if key := c.keys[keyID]; key != nil {
 		return key, nil
 	}
-	return nil, ErrInvalidToken
+	return nil, withReason(ReasonUnknownSigningKey, ErrInvalidToken)
 }
 
 func (c *jwksCache) fetch(parent context.Context) error {

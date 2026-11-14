@@ -68,7 +68,7 @@ func run() error {
 
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.NewHandler(db, notes.NewPostgresReader(db), logger, cfg.ReadinessTimeout, authenticator, noteCreator),
+		Handler:           httpapi.NewHandlerForEnvironment(db, notes.NewPostgresReader(db), logger, cfg.ReadinessTimeout, authenticator, noteCreator, os.Getenv("STREETMAP_ENV")),
 		ReadHeaderTimeout: cfg.HTTPReadHeaderTimeout,
 		ReadTimeout:       cfg.HTTPReadTimeout,
 		WriteTimeout:      cfg.HTTPWriteTimeout,

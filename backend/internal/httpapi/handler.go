@@ -37,6 +37,13 @@ type readinessData struct {
 }
 
 func NewHandler(database Pinger, noteReader notes.Reader, logger *slog.Logger, readinessTimeout time.Duration, authenticator Authenticator, noteCreator notes.Creator) http.Handler {
+	return NewHandlerForEnvironment(database, noteReader, logger, readinessTimeout, authenticator, noteCreator, "production")
+}
+
+// NewHandlerForEnvironment enables the development extension CORS policy only
+// for explicitly local environments. Production and other deployment modes
+// keep the handler's normal same-origin behavior.
+func NewHandlerForEnvironment(database Pinger, noteReader notes.Reader, logger *slog.Logger, readinessTimeout time.Duration, authenticator Authenticator, noteCreator notes.Creator, environment string) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -46,7 +53,11 @@ func NewHandler(database Pinger, noteReader notes.Reader, logger *slog.Logger, r
 	mux.HandleFunc("/api/v1/ready", handler.ready)
 	mux.HandleFunc("/api/v1/notes", handler.notesCollection)
 	mux.HandleFunc("/", handler.notFound)
-	return requestLogger(logger, mux)
+	var routes http.Handler = mux
+	if enablesDevelopmentExtensionCORS(environment) {
+		routes = developmentExtensionCORS(routes)
+	}
+	return requestLogger(logger, routes)
 }
 
 // Authenticated wraps a protected handler with the configured bearer-token

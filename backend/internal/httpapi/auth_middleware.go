@@ -18,17 +18,29 @@ func RequireAuthentication(authenticator Authenticator, logger *slog.Logger, nex
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if authenticator == nil {
+			logAuthenticationFailure(logger, auth.ReasonAuthenticatorUnavailable)
 			writeError(w, http.StatusServiceUnavailable, "authentication_unavailable", "Authentication is temporarily unavailable.", logger)
 			return
 		}
-		token, ok := bearerToken(r)
-		if !ok {
+		token, reason := bearerToken(r)
+		if reason != "" {
+			logAuthenticationFailure(logger, reason)
 			w.Header().Set("WWW-Authenticate", `Bearer realm="streetmap"`)
 			writeError(w, http.StatusUnauthorized, "unauthorized", "A valid bearer access token is required.", logger)
 			return
 		}
 		principal, err := authenticator.Authenticate(r.Context(), token)
 		if err != nil {
+			reason := auth.ReasonCodeOf(err)
+			if reason == auth.ReasonUnknownAuthenticationFailure {
+				switch {
+				case errors.Is(err, auth.ErrAccountUnavailable):
+					reason = auth.ReasonAccountUnavailable
+				case errors.Is(err, auth.ErrUnavailable):
+					reason = auth.ReasonAuthenticatorUnavailable
+				}
+			}
+			logAuthenticationFailure(logger, reason)
 			switch {
 			case errors.Is(err, auth.ErrInvalidToken):
 				w.Header().Set("WWW-Authenticate", `Bearer realm="streetmap", error="invalid_token"`)
@@ -36,7 +48,6 @@ func RequireAuthentication(authenticator Authenticator, logger *slog.Logger, nex
 			case errors.Is(err, auth.ErrAccountUnavailable):
 				writeError(w, http.StatusForbidden, "account_unavailable", "This StreetMap account is not available.", logger)
 			default:
-				logger.Error("authentication dependency unavailable")
 				writeError(w, http.StatusServiceUnavailable, "authentication_unavailable", "Authentication is temporarily unavailable.", logger)
 			}
 			return
@@ -51,14 +62,24 @@ func AuthenticatedPrincipal(ctx context.Context) (auth.Principal, bool) {
 	return principal, ok
 }
 
-func bearerToken(r *http.Request) (string, bool) {
+func bearerToken(r *http.Request) (string, auth.ReasonCode) {
 	values := r.Header.Values("Authorization")
+	if len(values) == 0 {
+		return "", auth.ReasonMissingBearerToken
+	}
 	if len(values) != 1 {
-		return "", false
+		return "", auth.ReasonMalformedBearerHeader
 	}
 	parts := strings.Fields(values[0])
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || parts[1] == "" {
-		return "", false
+		return "", auth.ReasonMalformedBearerHeader
 	}
-	return parts[1], true
+	return parts[1], ""
+}
+
+func logAuthenticationFailure(logger *slog.Logger, reason auth.ReasonCode) {
+	if reason == "" {
+		reason = auth.ReasonUnknownAuthenticationFailure
+	}
+	logger.Error("authentication rejected", "reason_code", string(reason))
 }

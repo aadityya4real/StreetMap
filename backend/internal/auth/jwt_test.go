@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
@@ -92,6 +94,94 @@ func signedTestToken(t *testing.T, key testSigningKey, issuer string, mutate fun
 		t.Fatalf("sign test token: %v", err)
 	}
 	return raw
+}
+
+type testECSigningKey struct {
+	id      string
+	private *ecdsa.PrivateKey
+}
+
+func newTestECSigningKey(t *testing.T, id string) testECSigningKey {
+	t.Helper()
+	private, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ES256 signing key: %v", err)
+	}
+	return testECSigningKey{id: id, private: private}
+}
+
+func (key testECSigningKey) jwk() map[string]string {
+	x := make([]byte, elliptic.P256().Params().BitSize/8)
+	y := make([]byte, elliptic.P256().Params().BitSize/8)
+	key.private.X.FillBytes(x)
+	key.private.Y.FillBytes(y)
+	return map[string]string{
+		"kty": "EC", "kid": key.id, "use": "sig", "alg": "ES256", "crv": "P-256",
+		"x": base64.RawURLEncoding.EncodeToString(x),
+		"y": base64.RawURLEncoding.EncodeToString(y),
+	}
+}
+
+func signedES256TestToken(t *testing.T, key testECSigningKey, issuer string, mutate func(*supabaseClaims), includeKeyID bool) string {
+	t.Helper()
+	now := time.Now()
+	anonymous := false
+	claims := &supabaseClaims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer: issuer, Subject: "synthetic-user-subject", Audience: jwt.ClaimStrings{testAudience},
+			ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)), IssuedAt: jwt.NewNumericDate(now.Add(-time.Minute)),
+		},
+		Role: "authenticated", IsAnonymous: &anonymous,
+	}
+	if mutate != nil {
+		mutate(claims)
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
+	if includeKeyID {
+		token.Header["kid"] = key.id
+	}
+	raw, err := token.SignedString(key.private)
+	if err != nil {
+		t.Fatalf("sign synthetic ES256 token: %v", err)
+	}
+	return raw
+}
+
+func newES256TestVerifier(t *testing.T, keys ...testECSigningKey) (*Verifier, func(...testECSigningKey)) {
+	t.Helper()
+	var keyLock sync.RWMutex
+	currentKeys := append([]testECSigningKey(nil), keys...)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/auth/v1/.well-known/jwks.json" {
+			http.NotFound(w, request)
+			return
+		}
+		jwks := struct {
+			Keys []map[string]string `json:"keys"`
+		}{Keys: make([]map[string]string, 0)}
+		keyLock.RLock()
+		defer keyLock.RUnlock()
+		for _, key := range currentKeys {
+			jwks.Keys = append(jwks.Keys, key.jwk())
+		}
+		_ = json.NewEncoder(w).Encode(jwks)
+	}))
+	t.Cleanup(server.Close)
+	config := Config{
+		ProjectURL: testProjectURL, Issuer: testIssuer, Audience: testAudience,
+		Algorithm: "ES256", JWKSCacheFor: time.Minute, ClockSkew: 0,
+	}
+	client := newJWKSHTTPClient(testSupabaseTransport(server.URL, server.Client().Transport))
+	verifier, err := newVerifierWithClient(config, client)
+	if err != nil {
+		t.Fatalf("create ES256 test verifier: %v", err)
+	}
+	setKeys := func(next ...testECSigningKey) {
+		keyLock.Lock()
+		defer keyLock.Unlock()
+		currentKeys = append([]testECSigningKey(nil), next...)
+	}
+	return verifier, setKeys
 }
 
 func newTestVerifier(t *testing.T, keys ...testSigningKey) (*Verifier, *atomic.Int32, *atomic.Int32, func(...testSigningKey), func() (<-chan struct{}, func())) {
@@ -190,52 +280,122 @@ func TestVerifierAcceptsValidAccessTokenAndUsesSafeDisplayName(t *testing.T) {
 	}
 }
 
+func TestVerifierAcceptsSyntheticES256TokenAndClassifiesFailures(t *testing.T) {
+	key := newTestECSigningKey(t, "synthetic-es256-key")
+	otherKey := newTestECSigningKey(t, key.id)
+	verifier, _ := newES256TestVerifier(t, key)
+
+	valid := signedES256TestToken(t, key, verifier.issuer, nil, true)
+	if _, err := verifier.Verify(context.Background(), valid); err != nil {
+		t.Fatalf("verify synthetic ES256 token: %v", err)
+	}
+	tests := []struct {
+		name       string
+		token      string
+		wantReason ReasonCode
+	}{
+		{"invalid signature", signedES256TestToken(t, otherKey, verifier.issuer, nil, true), ReasonInvalidSignature},
+		{"wrong issuer", signedES256TestToken(t, key, verifier.issuer, func(claims *supabaseClaims) { claims.Issuer = "https://synthetic.invalid/auth/v1" }, true), ReasonInvalidIssuer},
+		{"wrong audience", signedES256TestToken(t, key, verifier.issuer, func(claims *supabaseClaims) { claims.Audience = jwt.ClaimStrings{"other-test-audience"} }, true), ReasonInvalidAudience},
+		{"expired", signedES256TestToken(t, key, verifier.issuer, func(claims *supabaseClaims) { claims.ExpiresAt = jwt.NewNumericDate(time.Now().Add(-time.Minute)) }, true), ReasonExpiredToken},
+		{"missing key id", signedES256TestToken(t, key, verifier.issuer, nil, false), ReasonMissingKeyID},
+		{"unknown key id", func() string {
+			token := jwt.NewWithClaims(jwt.SigningMethodES256, &supabaseClaims{
+				RegisteredClaims: jwt.RegisteredClaims{
+					Issuer: verifier.issuer, Subject: "synthetic-user-subject", Audience: jwt.ClaimStrings{testAudience},
+					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)), IssuedAt: jwt.NewNumericDate(time.Now().Add(-time.Minute)),
+				},
+				Role: "authenticated", IsAnonymous: func() *bool { value := false; return &value }(),
+			})
+			token.Header["kid"] = "synthetic-unknown-key"
+			raw, err := token.SignedString(key.private)
+			if err != nil {
+				t.Fatalf("sign unknown-kid test token: %v", err)
+			}
+			return raw
+		}(), ReasonUnknownSigningKey},
+		{"unsupported algorithm", func() string {
+			rsaKey := newTestSigningKey(t, "synthetic-rsa-key")
+			return signedTestToken(t, rsaKey, verifier.issuer, nil)
+		}(), ReasonUnsupportedAlgorithm},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := verifier.Verify(context.Background(), test.token); !errors.Is(err, ErrInvalidToken) {
+				t.Fatalf("Verify error = %v, want ErrInvalidToken", err)
+			} else if got := ReasonCodeOf(err); got != test.wantReason {
+				t.Fatalf("reason code = %q, want %q", got, test.wantReason)
+			}
+		})
+	}
+}
+
+func TestES256JWKSRefreshMakesRotatedKeyAvailable(t *testing.T) {
+	first := newTestECSigningKey(t, "synthetic-first-es256-key")
+	rotated := newTestECSigningKey(t, "synthetic-rotated-es256-key")
+	verifier, setKeys := newES256TestVerifier(t, first)
+	if _, err := verifier.Verify(context.Background(), signedES256TestToken(t, first, verifier.issuer, nil, true)); err != nil {
+		t.Fatalf("verify initial ES256 key: %v", err)
+	}
+	setKeys(rotated)
+	verifier.keys.mu.Lock()
+	verifier.keys.refreshGap = 0
+	verifier.keys.expiresAt = time.Now().Add(-time.Second)
+	verifier.keys.mu.Unlock()
+	if _, err := verifier.Verify(context.Background(), signedES256TestToken(t, rotated, verifier.issuer, nil, true)); err != nil {
+		t.Fatalf("verify rotated ES256 key after JWKS refresh: %v", err)
+	}
+}
+
 func TestVerifierRejectsMalformedOrInappropriateTokens(t *testing.T) {
 	key := newTestSigningKey(t, "active-key")
 	otherKey := newTestSigningKey(t, "active-key")
 	verifier, _, _, _, _ := newTestVerifier(t, key)
 	anonymous := true
 	tests := []struct {
-		name  string
-		token func() string
+		name       string
+		token      func() string
+		wantReason ReasonCode
 	}{
-		{"malformed", func() string { return "not.a.jwt" }},
-		{"invalid signature", func() string { return signedTestToken(t, otherKey, verifier.issuer, nil) }},
+		{"malformed", func() string { return "not.a.jwt" }, ReasonInvalidJWTStructure},
+		{"invalid signature", func() string { return signedTestToken(t, otherKey, verifier.issuer, nil) }, ReasonInvalidSignature},
 		{"expired", func() string {
 			return signedTestToken(t, key, verifier.issuer, func(c *supabaseClaims) { c.ExpiresAt = jwt.NewNumericDate(time.Now().Add(-time.Minute)) })
-		}},
+		}, ReasonExpiredToken},
 		{"future not-before", func() string {
 			return signedTestToken(t, key, verifier.issuer, func(c *supabaseClaims) { c.NotBefore = jwt.NewNumericDate(time.Now().Add(time.Minute)) })
-		}},
+		}, ReasonInvalidNotBefore},
 		{"future issued-at", func() string {
 			return signedTestToken(t, key, verifier.issuer, func(c *supabaseClaims) { c.IssuedAt = jwt.NewNumericDate(time.Now().Add(time.Minute)) })
-		}},
+		}, ReasonInvalidIssuedAt},
 		{"wrong issuer", func() string {
 			return signedTestToken(t, key, verifier.issuer, func(c *supabaseClaims) { c.Issuer = "https://wrong.example/auth/v1" })
-		}},
+		}, ReasonInvalidIssuer},
 		{"wrong audience", func() string {
 			return signedTestToken(t, key, verifier.issuer, func(c *supabaseClaims) { c.Audience = jwt.ClaimStrings{"other-api"} })
-		}},
+		}, ReasonInvalidAudience},
 		{"additional audience", func() string {
 			return signedTestToken(t, key, verifier.issuer, func(c *supabaseClaims) { c.Audience = jwt.ClaimStrings{testAudience, "other-api"} })
-		}},
+		}, ReasonInvalidAudience},
 		{"missing subject", func() string {
 			return signedTestToken(t, key, verifier.issuer, func(c *supabaseClaims) { c.Subject = "" })
-		}},
+		}, ReasonInvalidSubject},
 		{"anonymous token", func() string {
 			return signedTestToken(t, key, verifier.issuer, func(c *supabaseClaims) { c.IsAnonymous = &anonymous })
-		}},
+		}, ReasonInvalidAnonymousStatus},
 		{"wrong role", func() string {
 			return signedTestToken(t, key, verifier.issuer, func(c *supabaseClaims) { c.Role = "anon" })
-		}},
+		}, ReasonInvalidRole},
 		{"missing anonymous claim", func() string {
 			return signedTestToken(t, key, verifier.issuer, func(c *supabaseClaims) { c.IsAnonymous = nil })
-		}},
+		}, ReasonInvalidAnonymousStatus},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			if _, err := verifier.Verify(context.Background(), test.token()); !errors.Is(err, ErrInvalidToken) {
 				t.Fatalf("Verify error = %v, want ErrInvalidToken", err)
+			} else if got := ReasonCodeOf(err); got != test.wantReason {
+				t.Fatalf("reason code = %q, want %q", got, test.wantReason)
 			}
 		})
 	}
@@ -246,7 +406,7 @@ func TestVerifierRejectsMalformedOrInappropriateTokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create unsigned token: %v", err)
 	}
-	if _, err := verifier.Verify(context.Background(), raw); !errors.Is(err, ErrInvalidToken) {
+	if _, err := verifier.Verify(context.Background(), raw); !errors.Is(err, ErrInvalidToken) || ReasonCodeOf(err) != ReasonUnsupportedAlgorithm {
 		t.Fatalf("unsigned token error = %v, want ErrInvalidToken", err)
 	}
 
@@ -256,7 +416,7 @@ func TestVerifierRejectsMalformedOrInappropriateTokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create HMAC token: %v", err)
 	}
-	if _, err := verifier.Verify(context.Background(), raw); !errors.Is(err, ErrInvalidToken) {
+	if _, err := verifier.Verify(context.Background(), raw); !errors.Is(err, ErrInvalidToken) || ReasonCodeOf(err) != ReasonUnsupportedAlgorithm {
 		t.Fatalf("unsupported algorithm error = %v, want ErrInvalidToken", err)
 	}
 
@@ -270,11 +430,11 @@ func TestVerifierRejectsMalformedOrInappropriateTokens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := verifier.Verify(context.Background(), raw); !errors.Is(err, ErrInvalidToken) {
+	if _, err := verifier.Verify(context.Background(), raw); !errors.Is(err, ErrInvalidToken) || ReasonCodeOf(err) != ReasonInvalidJWTStructure {
 		t.Fatalf("malformed claim types error = %v, want ErrInvalidToken", err)
 	}
 
-	if _, err := verifier.Verify(context.Background(), strings.Repeat("a", 16*1024+1)); !errors.Is(err, ErrInvalidToken) {
+	if _, err := verifier.Verify(context.Background(), strings.Repeat("a", 16*1024+1)); !errors.Is(err, ErrInvalidToken) || ReasonCodeOf(err) != ReasonInvalidJWTStructure {
 		t.Fatalf("oversized token error = %v, want ErrInvalidToken", err)
 	}
 }
@@ -317,13 +477,13 @@ func TestJWKSRefreshFailureUnknownKeyAndRotation(t *testing.T) {
 
 	failing, _, failingStatus, _, _ := newTestVerifier(t, first)
 	failingStatus.Store(http.StatusServiceUnavailable)
-	if _, err := failing.Verify(context.Background(), signedTestToken(t, first, failing.issuer, nil)); !errors.Is(err, ErrUnavailable) {
+	if _, err := failing.Verify(context.Background(), signedTestToken(t, first, failing.issuer, nil)); !errors.Is(err, ErrUnavailable) || ReasonCodeOf(err) != ReasonJWKSUnavailable {
 		t.Fatalf("JWKS failure error = %v, want ErrUnavailable", err)
 	}
 
 	unknown, _, _, _, _ := newTestVerifier(t, first)
 	unknown.keys.refreshGap = 0
-	if _, err := unknown.Verify(context.Background(), signedTestToken(t, rotated, unknown.issuer, nil)); !errors.Is(err, ErrInvalidToken) {
+	if _, err := unknown.Verify(context.Background(), signedTestToken(t, rotated, unknown.issuer, nil)); !errors.Is(err, ErrInvalidToken) || ReasonCodeOf(err) != ReasonUnknownSigningKey {
 		t.Fatalf("unknown key error = %v, want ErrInvalidToken", err)
 	}
 }

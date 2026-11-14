@@ -500,7 +500,7 @@ test('an expired authenticated session opens account recovery without losing the
     onClose: () => undefined,
     actions: {
       createNoteAttempt: () => ({
-        submit: async () => { throw new CreateNoteApiError('authentication', 'Your StreetMap session is missing or expired. Sign in and try again.'); },
+        submit: async () => { throw new CreateNoteApiError('authentication', 'sensitive token detail must not be displayed', undefined, undefined, 'HTTP_401_UNAUTHORIZED'); },
       }),
     },
   }));
@@ -511,6 +511,8 @@ test('an expired authenticated session opens account recovery without losing the
     assert.equal(authRequests, 1);
     assert.match(mounted.container.textContent, /could not verify the current session/);
     assert.match(mounted.container.textContent, /Sign out in the account panel, then sign in again/);
+    assert.match(mounted.container.textContent, /Reference: HTTP_401_UNAUTHORIZED/);
+    assert.doesNotMatch(mounted.container.textContent, /sensitive token detail/);
     assert.equal(mounted.container.querySelector('#composer-title-input').value, 'Safer evening entrance');
     assert.equal(mounted.container.querySelector('#composer-body-input').value, 'Use the lit entrance after dusk.');
   } finally {

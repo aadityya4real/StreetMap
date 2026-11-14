@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -99,6 +100,76 @@ func TestRequireAuthenticationHidesInternalErrorsAndFailsClosed(t *testing.T) {
 				t.Fatal("response exposed internal details or bearer token")
 			}
 		})
+	}
+}
+
+type diagnosticVerifier struct{}
+
+func (diagnosticVerifier) Verify(context.Context, string) (auth.Identity, error) {
+	return auth.Identity{Issuer: "synthetic-issuer", Subject: "synthetic-subject"}, nil
+}
+
+type diagnosticResolver struct{ err error }
+
+func (resolver diagnosticResolver) Resolve(context.Context, auth.Identity) (auth.Principal, error) {
+	return auth.Principal{}, resolver.err
+}
+
+func TestAuthenticationDiagnosticLogsUseFixedCodesAndExcludeSensitiveValues(t *testing.T) {
+	const (
+		tokenMarker = "synthetic-bearer-token-marker"
+		emailMarker = "synthetic-person@example.invalid"
+		userMarker  = "synthetic-user-id-marker"
+		errorMarker = "synthetic-database-error-marker"
+	)
+	var logOutput bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logOutput, nil))
+	service := auth.NewService(diagnosticVerifier{}, diagnosticResolver{
+		err: errors.New(errorMarker + " " + emailMarker + " " + userMarker),
+	})
+	handler := RequireAuthentication(service, logger, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	request := httptest.NewRequest(http.MethodPost, "/protected", nil)
+	request.Header.Set("Authorization", "Bearer "+tokenMarker)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("identity resolver failure status = %d, want 503", recorder.Code)
+	}
+	if !strings.Contains(logOutput.String(), string(auth.ReasonIdentityResolverUnavailable)) {
+		t.Fatalf("diagnostic reason missing from log: %s", logOutput.String())
+	}
+	for _, sensitive := range []string{tokenMarker, emailMarker, userMarker, errorMarker, "Authorization"} {
+		if strings.Contains(logOutput.String(), sensitive) || strings.Contains(recorder.Body.String(), sensitive) {
+			t.Fatalf("authentication diagnostic exposed %q", sensitive)
+		}
+	}
+	if strings.Contains(recorder.Body.String(), string(auth.ReasonIdentityResolverUnavailable)) {
+		t.Fatal("public response exposed the internal diagnostic reason")
+	}
+
+	logOutput.Reset()
+	malformed := httptest.NewRequest(http.MethodPost, "/protected", nil)
+	malformed.Header.Set("Authorization", "Bearer "+tokenMarker+" extra")
+	malformedRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(malformedRecorder, malformed)
+	if malformedRecorder.Code != http.StatusUnauthorized || !strings.Contains(logOutput.String(), string(auth.ReasonMalformedBearerHeader)) {
+		t.Fatalf("malformed bearer diagnostics status=%d log=%s", malformedRecorder.Code, logOutput.String())
+	}
+	if strings.Contains(logOutput.String(), tokenMarker) || strings.Contains(malformedRecorder.Body.String(), tokenMarker) {
+		t.Fatal("malformed bearer diagnostics exposed request token material")
+	}
+}
+
+func TestAuthenticationDiagnosticDistinguishesMissingBearer(t *testing.T) {
+	var logOutput bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logOutput, nil))
+	handler := RequireAuthentication(&stubAuthenticator{}, logger, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/protected", nil))
+	if recorder.Code != http.StatusUnauthorized || !strings.Contains(logOutput.String(), string(auth.ReasonMissingBearerToken)) {
+		t.Fatalf("missing bearer diagnostics status=%d log=%s", recorder.Code, logOutput.String())
 	}
 }
 
