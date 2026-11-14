@@ -18,7 +18,7 @@ func enablesDevelopmentExtensionCORS(environment string) bool {
 
 func developmentExtensionCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/notes" && r.URL.Path != "/api/v1/health" {
+		if !isDevelopmentCORSPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -42,6 +42,8 @@ func developmentExtensionCORS(next http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Allow-Methods", allowedMethodsForPath(r.URL.Path))
 			if r.URL.Path == "/api/v1/notes" {
 				w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Idempotency-Key")
+			} else if strings.HasSuffix(r.URL.Path, "/vote") {
+				w.Header().Set("Access-Control-Allow-Headers", "Authorization")
 			}
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -79,7 +81,7 @@ func allowedCORSPreflight(r *http.Request) bool {
 }
 
 func allowedMethodsForPath(path string) string {
-	if path == "/api/v1/notes" {
+	if path == "/api/v1/notes" || strings.HasSuffix(path, "/vote") {
 		return "GET, POST, OPTIONS"
 	}
 	return "GET, OPTIONS"
@@ -89,7 +91,11 @@ func isAllowedCORSMethod(path, method string) bool {
 	if method == http.MethodOptions || method == http.MethodGet {
 		return true
 	}
-	return path == "/api/v1/notes" && method == http.MethodPost
+	return (path == "/api/v1/notes" || strings.HasSuffix(path, "/vote")) && method == http.MethodPost
+}
+
+func isDevelopmentCORSPath(path string) bool {
+	return path == "/api/v1/notes" || path == "/api/v1/health" || (strings.HasPrefix(path, "/api/v1/notes/") && strings.HasSuffix(path, "/vote"))
 }
 
 func addVary(header http.Header, value string) {

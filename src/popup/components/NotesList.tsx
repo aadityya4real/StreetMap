@@ -14,9 +14,11 @@ interface NotesListProps {
   onRetry?: () => void;
   listRef?: RefObject<HTMLDivElement | null>;
   onListScroll?: (scrollTop: number) => void;
+  isAuthenticated: boolean;
+  onAuthenticationRequired: () => void;
 }
 
-export default function NotesList({ notes, query, status = 'ready', message, onRetry, listRef, onListScroll }: NotesListProps) {
+export default function NotesList({ notes, query, status = 'ready', message, onRetry, listRef, onListScroll, isAuthenticated, onAuthenticationRequired }: NotesListProps) {
   if (status !== 'ready') return <NotesState state={status} message={message} onRetry={onRetry} />;
   if (notes.length === 0) return <EmptyState query={query} message={message} />;
 
@@ -28,7 +30,7 @@ export default function NotesList({ notes, query, status = 'ready', message, onR
       onScroll={(event) => onListScroll?.(event.currentTarget.scrollTop)}
     >
       {notes.map((note) => (
-        <NoteCard key={note.id} note={note} />
+        <NoteCard key={note.id} note={note} isAuthenticated={isAuthenticated} onAuthenticationRequired={onAuthenticationRequired} />
       ))}
     </div>
   );

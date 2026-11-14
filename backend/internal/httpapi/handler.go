@@ -22,6 +22,7 @@ type Handler struct {
 	database         Pinger
 	noteReader       notes.Reader
 	noteCreator      notes.Creator
+	voter            notes.Voter
 	logger           *slog.Logger
 	readinessTimeout time.Duration
 	authenticator    Authenticator
@@ -36,22 +37,27 @@ type readinessData struct {
 	Dependencies map[string]string `json:"dependencies"`
 }
 
-func NewHandler(database Pinger, noteReader notes.Reader, logger *slog.Logger, readinessTimeout time.Duration, authenticator Authenticator, noteCreator notes.Creator) http.Handler {
-	return NewHandlerForEnvironment(database, noteReader, logger, readinessTimeout, authenticator, noteCreator, "production")
+func NewHandler(database Pinger, noteReader notes.Reader, logger *slog.Logger, readinessTimeout time.Duration, authenticator Authenticator, noteCreator notes.Creator, voters ...notes.Voter) http.Handler {
+	return NewHandlerForEnvironment(database, noteReader, logger, readinessTimeout, authenticator, noteCreator, "production", voters...)
 }
 
 // NewHandlerForEnvironment enables the development extension CORS policy only
 // for explicitly local environments. Production and other deployment modes
 // keep the handler's normal same-origin behavior.
-func NewHandlerForEnvironment(database Pinger, noteReader notes.Reader, logger *slog.Logger, readinessTimeout time.Duration, authenticator Authenticator, noteCreator notes.Creator, environment string) http.Handler {
+func NewHandlerForEnvironment(database Pinger, noteReader notes.Reader, logger *slog.Logger, readinessTimeout time.Duration, authenticator Authenticator, noteCreator notes.Creator, environment string, voters ...notes.Voter) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	handler := Handler{database: database, noteReader: noteReader, noteCreator: noteCreator, logger: logger, readinessTimeout: readinessTimeout, authenticator: authenticator}
+	var voter notes.Voter
+	if len(voters) > 0 {
+		voter = voters[0]
+	}
+	handler := Handler{database: database, noteReader: noteReader, noteCreator: noteCreator, voter: voter, logger: logger, readinessTimeout: readinessTimeout, authenticator: authenticator}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/health", handler.health)
 	mux.HandleFunc("/api/v1/ready", handler.ready)
 	mux.HandleFunc("/api/v1/notes", handler.notesCollection)
+	mux.HandleFunc("/api/v1/notes/{noteID}/vote", handler.noteVote)
 	mux.HandleFunc("/", handler.notFound)
 	var routes http.Handler = mux
 	if enablesDevelopmentExtensionCORS(environment) {

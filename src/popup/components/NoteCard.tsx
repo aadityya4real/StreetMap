@@ -1,12 +1,20 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { NOTE_CATEGORY_LABELS, type DisplayNote } from '../types/note';
+import { getNoteVoteState, toggleNoteVote } from '../services/noteVotes';
 
 interface NoteCardProps {
   note: DisplayNote;
+  isAuthenticated: boolean;
+  onAuthenticationRequired: () => void;
 }
 
-export default function NoteCard({ note }: NoteCardProps) {
+export default function NoteCard({ note, isAuthenticated, onAuthenticationRequired }: NoteCardProps) {
   const [expanded, setExpanded] = useState(false);
+  const [voted, setVoted] = useState(false);
+  const [voteCount, setVoteCount] = useState(note.helpful_vote_count);
+  const [votePending, setVotePending] = useState(false);
+  const [voteError, setVoteError] = useState('');
+  useEffect(() => { if (isAuthenticated) void getNoteVoteState(note.id).then((state) => { setVoted(state.voted); setVoteCount(state.count); }).catch(() => undefined); }, [isAuthenticated, note.id]);
   const detailsId = `note-details-${note.id}`;
   const matchLabel = note.group === 'nearby'
     ? 'Nearby note'
@@ -30,9 +38,10 @@ export default function NoteCard({ note }: NoteCardProps) {
           <time className="note-time" dateTime={note.created_at}>{formatCreatedAt(note.created_at)}</time>
         </span>
         <span className="note-title" role="heading" aria-level={3}>{note.title}</span>
-        <span className="note-summary-footer">
-          <span className="match-label">{matchLabel}</span>
-          <span className="helpful-count" aria-label={`${note.helpful_vote_count} helpful votes`}>
+      </button>
+      <span className="note-summary-footer">
+        <span className="match-label">{matchLabel}</span>
+        <button className={`helpful-count${voted ? ' is-voted' : ''}`} type="button" aria-label={`${voted ? 'Remove helpful vote' : 'Mark helpful'}, ${voteCount} helpful votes`} aria-pressed={voted} disabled={votePending} onClick={() => { if (!isAuthenticated) { onAuthenticationRequired(); return; } setVotePending(true); setVoteError(''); void toggleNoteVote(note.id).then((state) => { setVoted(state.voted); setVoteCount(state.count); }).catch((error: unknown) => { setVoteError(error instanceof Error ? error.message : 'StreetMap could not update this vote.'); }).finally(() => setVotePending(false)); }}>
             <svg aria-hidden="true" viewBox="0 0 16 16" fill="none">
               <path
                 d="M5.4 7.1 7.5 3c.3-.6.8-.8 1.3-.6.5.2.7.8.5 1.3l-.6 1.7h2.2c1 0 1.6.9 1.3 1.8l-1.2 4.2c-.2.6-.7 1-1.3 1H5.4V7.1Z"
@@ -42,10 +51,10 @@ export default function NoteCard({ note }: NoteCardProps) {
               />
               <path d="M3.1 7h2.1v5.4H3.1z" stroke="currentColor" strokeWidth="1.2" />
             </svg>
-            {note.helpful_vote_count}
-          </span>
-        </span>
-      </button>
+            {voteCount}
+          </button>
+      </span>
+      {voteError && <p role="alert">{voteError}</p>}
       {expanded && (
         <div className="note-details" id={detailsId}>
           <p className="note-description">{note.body}</p>

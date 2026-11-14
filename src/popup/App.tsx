@@ -134,6 +134,8 @@ export default function App() {
             onRetry={retryNotes}
             listRef={notesListRef}
             onListScroll={handleNotesListScroll}
+            isAuthenticated={auth.status === 'authenticated'}
+            onAuthenticationRequired={openAuthPanel}
           />
           {notesState.status === 'ready' && notesState.hasMore && (
             <div className="load-more-wrap">

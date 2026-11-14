@@ -1054,7 +1054,16 @@ h1 {
   color: #777e78;
   font-size: 10px;
   font-weight: 650;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  font-family: inherit;
+  cursor: pointer;
 }
+
+.helpful-count:disabled { cursor: wait; }
+.helpful-count.is-voted { color: var(--color-accent-dark, #8b6500); }
+.helpful-count:focus-visible { outline: 2px solid var(--color-accent, #e9bd55); outline-offset: 2px; }
 
 .helpful-count svg {
   width: 14px;
